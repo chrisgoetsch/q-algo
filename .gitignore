@@ -2,3 +2,7 @@
 __pycache__/
 *.log
 *.jsonl
+*.pyc
+Q-algo.zip
+.env.backup
+
