@@ -5,8 +5,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 🚀 Inputs
-code = input("Paste the code from callback URL: ").strip()
-code_verifier = input("Paste the code_verifier from gen_auth_url.py: ").strip()
+code = "BV_g_m5HLFDL0Y_LuJ64dhHDossfWgBu1IJZijL6T4sU-"
+code_verifier = "a0Z8mLgpr-FdmAxK6DRucgN6_VP3MCHRimlFpE7zmN6CsWCy_30dzYkHcm6xH8SGlDeKXo6ou7-IRekOk5qD4Q"
+
 
 # 🔐 Config
 client_id = os.getenv("TRADESTATION_CLIENT_ID")
