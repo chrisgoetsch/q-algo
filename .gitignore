@@ -1,3 +1,14 @@
+<<<<<<< HEAD
 *.env
 __pycache__/
 *.pyc
+=======
+.env
+__pycache__/
+*.log
+*.jsonl
+*.pyc
+Q-algo.zip
+.env.backup
+
+>>>>>>> 3e834bce51934bf67fdf109392048aa34942388a
