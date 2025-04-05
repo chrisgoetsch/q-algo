@@ -1,0 +1,1 @@
+# SampleComponent.jsx - placeholder
