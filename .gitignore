@@ -12,3 +12,5 @@ Q-algo.zip
 .env.backup
 
 >>>>>>> 3e834bce51934bf67fdf109392048aa34942388a
+qalgo-key.pem
+pkce_state.json
