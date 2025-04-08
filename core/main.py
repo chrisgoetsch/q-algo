@@ -4,9 +4,12 @@ from dotenv import load_dotenv
 import os
 import datetime
 
+# Load environment variables
 load_dotenv()
+
 app = FastAPI()
 
+# Home route for dashboard/API test
 @app.get("/")
 def home():
     return {
@@ -15,6 +18,7 @@ def home():
         "timestamp": datetime.datetime.now().isoformat()
     }
 
+# Token healthcheck
 @app.get("/token-status")
 def token_status():
     return {
@@ -24,7 +28,8 @@ def token_status():
         "tokenHealth": "manual check required unless connected to API"
     }
 
+# Placeholder for future endpoint: live trade execution
 @app.get("/live-trade")
 def live_trade_test():
+    # This would normally pull data, run Q Algo logic, and trigger order routing
     return JSONResponse(status_code=501, content={"message": "Live trade logic not yet connected."})
-

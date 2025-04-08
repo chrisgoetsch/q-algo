@@ -1,66 +1,35 @@
-import os
 import requests
-from dotenv import load_dotenv
+import json
 
-load_dotenv()
+# 🛂 TradeStation credentials
+client_id = "8uCRRizNTzgBuTdkIZF7zaZiouYcKZH7"  # Your client_id
+redirect_uri = "https://q-algo.com/callback"  # Your redirect URI
+token_url = "https://signin.tradestation.com/oauth/token"  # Token 
+endpoint
 
-# 🚀 Inputs
-code = "BV_g_m5HLFDL0Y_LuJ64dhHDossfWgBu1IJZijL6T4sU-"
-code_verifier = "a0Z8mLgpr-FdmAxK6DRucgN6_VP3MCHRimlFpE7zmN6CsWCy_30dzYkHcm6xH8SGlDeKXo6ou7-IRekOk5qD4Q"
+# 🎯 Get the authorization code from the URL (the one you received in the 
+browser)
+authorization_code = "XYZ123"  # <-- Replace with the code you received in 
+the URL!
 
+# 🔑 Read code_verifier from pkce_state.json
+with open("pkce_state.json", "r") as f:
+    code_verifier = json.load(f)["code_verifier"]
 
-# 🔐 Config
-client_id = os.getenv("TRADESTATION_CLIENT_ID")
-redirect_uri = os.getenv("TRADESTATION_REDIRECT_URI")
-
-# 📡 Exchange code for tokens
-data = {
+# 📡 Exchange code for access/refresh tokens
+payload = {
     "grant_type": "authorization_code",
     "client_id": client_id,
-    "code": code,
+    "code": authorization_code,
     "redirect_uri": redirect_uri,
-    "code_verifier": code_verifier
+    "code_verifier": code_verifier,
 }
-headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-response = requests.post("https://signin.tradestation.com/oauth/token", data=data, headers=headers)
+response = requests.post(token_url, data=payload)
 
-# ✅ Handle response
+# Output the response
 if response.status_code == 200:
-    tokens = response.json()
-    access_token = tokens["access_token"]
-    refresh_token = tokens["refresh_token"]
-
-    # 💾 Update .env file
-    def replace_env_var(file_path, key, new_value):
-        with open(file_path, "r") as f:
-            lines = f.readlines()
-        with open(file_path, "w") as f:
-            found = False
-            for line in lines:
-                if line.startswith(key + "="):
-                    f.write(f"{key}={new_value}\n")
-                    found = True
-                else:
-                    f.write(line)
-            if not found:
-                f.write(f"{key}={new_value}\n")
-
-    env_path = ".env"
-    replace_env_var(env_path, "TRADESTATION_ACCESS_TOKEN", access_token)
-    replace_env_var(env_path, "TRADESTATION_REFRESH_TOKEN", refresh_token)
-
-    print("✅ Token exchange successful.")
-    print(f"🔐 Access Token (first 40): {access_token[:40]}...")
-    print(f"🔁 Refresh Token (first 40): {refresh_token[:40]}...")
-    print("💾 Tokens saved to .env successfully.")
-
-    # 🔁 GitHub push (safe — .env excluded via .gitignore)
-    print("📦 Committing updated .env (excluded) and pushing code...")
-    os.system("git add .")
-    os.system("git commit -m '🔁 Auto token refresh and project sync'")
-    os.system("git push")
-
+    print("\n🎟️ Token Response:\n", response.json())
 else:
-    print("❌ Error exchanging token:")
-    print(response.status_code, response.text)
+    print(f"❌ Error: {response.status_code} - {response.text}")
+
