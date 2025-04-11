@@ -1,16 +1,17 @@
-<<<<<<< HEAD
-*.env
-__pycache__/
-*.pyc
-=======
+# Environment + auth
 .env
-__pycache__/
-*.log
-*.jsonl
-*.pyc
-Q-algo.zip
 .env.backup
-
->>>>>>> 3e834bce51934bf67fdf109392048aa34942388a
 qalgo-key.pem
 pkce_state.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs and training data
+*.log
+*.jsonl
+
+# Zip/package artifacts
+Q-algo.zip
+
