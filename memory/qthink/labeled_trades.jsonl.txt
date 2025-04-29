@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-04-19T14:55Z",
+  "trade_id": "SPY437C_20250419",
+  "entry_summary": "Breakout setup identified with VWAP reclaim + gamma flip.",
+  "exit_feedback": "Premature exit. 20% upside remained.",
+  "regret_score": 0.41,
+  "tags": ["gamma_flip", "early_exit", "vwap_reclaim"]
+}

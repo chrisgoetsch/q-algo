@@ -1,0 +1,149 @@
+[
+    {
+        "name": "gamma_flip_surge",
+        "trigger": "SPY crosses gamma wall with GEX polarity flip",
+        "description": "Momentum breakout triggered by a dealer gamma wall reversal, confirmed by mesh alignment and VWAP reclaim.",
+        "agents_required": [
+            "Q Gamma",
+            "Q Precision",
+            "Q Quant"
+        ],
+        "preferred_time_blocks": [
+            "12:30\u20132:30 PM"
+        ],
+        "capital_tier_range": [
+            3,
+            5
+        ],
+        "expected_hold_time": [
+            10,
+            20
+        ],
+        "rr_target": 2.2,
+        "risk_notes": "Avoid after 3:15 PM due to IV crush; verify mesh alignment > 0.8",
+        "exit_logic": "VWAP trailing or target-based; cut if dealer flow reverses",
+        "journaling_tags": [
+            "breakout",
+            "momentum",
+            "GEX_flip"
+        ],
+        "decay_risk": 0.4,
+        "confidence_score_boost": 0.12,
+        "journaling_flag": "high_conviction_breakout",
+        "failure_conditions": [
+            "IV > 60%",
+            "Q Trap active",
+            "GEX still negative"
+        ]
+    },
+    {
+        "name": "trap_zone_reversal",
+        "trigger": "False breakout leads to liquidity sweep and sharp reversal",
+        "description": "Liquidity vacuum traps retail on breakout, then SPY reverses sharply with mesh fade.",
+        "agents_required": [
+            "Q Trap",
+            "Q Shield",
+            "Q Precision"
+        ],
+        "preferred_time_blocks": [
+            "9:50\u201310:15 AM",
+            "2:50\u20133:20 PM"
+        ],
+        "capital_tier_range": [
+            2,
+            3
+        ],
+        "expected_hold_time": [
+            5,
+            10
+        ],
+        "rr_target": 1.8,
+        "risk_notes": "High regret risk if no follow-through in first 2 mins",
+        "exit_logic": "Candle fail or rapid retest break",
+        "journaling_tags": [
+            "reversal",
+            "trap",
+            "liquidity_sweep"
+        ],
+        "decay_risk": 0.3,
+        "confidence_score_boost": 0.08,
+        "journaling_flag": "reversal_snap",
+        "failure_conditions": [
+            "No volume spike",
+            "Q Quant bullish",
+            "Low IV"
+        ]
+    },
+    {
+        "name": "put_wall_deflection",
+        "trigger": "SPY tests major put wall and rebounds with flow support",
+        "description": "SPY bounces intraday off a deep OI put wall, often acting as a liquidity zone where dealer flow shifts from defensive to neutral.",
+        "agents_required": [
+            "Q Block",
+            "Q Shield"
+        ],
+        "preferred_time_blocks": [
+            "12:00\u20132:15 PM"
+        ],
+        "capital_tier_range": [
+            2,
+            4
+        ],
+        "expected_hold_time": [
+            8,
+            15
+        ],
+        "rr_target": 1.6,
+        "risk_notes": "Must confirm bounce with delta or VWAP reclaim; avoid if GEX is dropping",
+        "exit_logic": "Revert to VWAP or top of prior zone; cut if flow fails",
+        "journaling_tags": [
+            "put_wall",
+            "bounce",
+            "support"
+        ],
+        "decay_risk": 0.5,
+        "confidence_score_boost": 0.09,
+        "journaling_flag": "put_wall_deflect",
+        "failure_conditions": [
+            "Dealer delta stays short",
+            "low bounce volume",
+            "Q Gamma bearish"
+        ]
+    },
+    {
+        "name": "liquidity_gap_thrust",
+        "trigger": "SPY fills air pocket left by low OI or flow void",
+        "description": "Rapid directional thrust as SPY moves through unprotected price zones with no OI or gamma clusters.",
+        "agents_required": [
+            "Q Precision",
+            "Q Quant"
+        ],
+        "preferred_time_blocks": [
+            "10:30\u20131:00 PM"
+        ],
+        "capital_tier_range": [
+            3,
+            4
+        ],
+        "expected_hold_time": [
+            6,
+            12
+        ],
+        "rr_target": 1.9,
+        "risk_notes": "Thrust must be clean; avoid if volume divergence appears or mesh is unaligned",
+        "exit_logic": "Scalp exit or partial take on 1.5x SL gain",
+        "journaling_tags": [
+            "gap",
+            "momentum",
+            "unfilled_zone"
+        ],
+        "decay_risk": 0.3,
+        "confidence_score_boost": 0.1,
+        "journaling_flag": "gap_thrust_surge",
+        "failure_conditions": [
+            "OI cluster above",
+            "flow divergence",
+            "Q Trap active"
+        ]
+    }
+]

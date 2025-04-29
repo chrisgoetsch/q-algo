@@ -1,0 +1,10 @@
+requests
+python-dotenv
+joblib
+scikit-learn
+pandas
+openai
+websockets
+fastapi
+uvicorn
+pytest

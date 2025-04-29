@@ -1,0 +1,50 @@
+[
+  {
+    "pattern_name": "gamma trap fade",
+    "behavior_type": "dealer unwind",
+    "conditions": {
+      "gex": "< -1.5",
+      "oi_call_ratio": "> 3.0",
+      "skew": "< -0.4",
+      "spot_to_strike_distance": "< 1.5"
+    },
+    "expected_price_behavior": "IV crush followed by fade to VWAP",
+    "playbook": "Avoid momentum entries; favor short-duration scalp"
+  },
+  {
+    "pattern_name": "max pain compression",
+    "behavior_type": "pin drift",
+    "conditions": {
+      "gex": "neutral",
+      "dex": "near 0",
+      "spot_close_to_max_pain": true,
+      "time_of_day": "last_hour"
+    },
+    "expected_price_behavior": "SPY drifts toward max pain strike",
+    "playbook": "Avoid new trades; suppress q_precision and q_quant"
+  },
+  {
+    "pattern_name": "dealer squeeze reversal",
+    "behavior_type": "short vol flip",
+    "conditions": {
+      "gex": "> 1.2",
+      "iv": "< 0.2",
+      "skew": "> 0.3",
+      "oi_put_ratio": "> 2.0"
+    },
+    "expected_price_behavior": "Up-move followed by reversal into put-heavy gamma zone",
+    "playbook": "Fade strength; allow q_trap override"
+  },
+  {
+    "pattern_name": "zero gamma drift",
+    "behavior_type": "dealer neutrality",
+    "conditions": {
+      "gex": "near 0",
+      "dex": "near 0",
+      "iv": "< 0.25",
+      "skew": "flat"
+    },
+    "expected_price_behavior": "Slow drift, no hedging bias",
+    "playbook": "Only scalp setups allowed; disable large position sizing"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "recent_trends": [
+    "High IV crush days favored early exits",
+    "Pin drift near max pain suppressed q_quant performance"
+  ],
+  "auto_recommendations": {
+    "disable_agents": ["q_block"],
+    "preferred_mode": "scalp_only"
+  }
+}

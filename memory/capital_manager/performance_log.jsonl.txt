@@ -1,0 +1,6 @@
+{
+  "timestamp": "...",
+  "trade_id": "INIT_LOG",
+  "pnl": 0.0,
+  "allocation_pct": 0.2
+}

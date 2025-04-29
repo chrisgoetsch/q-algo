@@ -1,0 +1,6 @@
+{
+  "iv_spike": 0.3,
+  "gamma_trap_threshold": -1.5,
+  "delta_neutral_band": [-0.2, 0.2],
+  "skew_reversal_threshold": 0.4
+}

@@ -1,0 +1,23 @@
+# System files
+.DS_Store
+__pycache__/
+*.pyc
+*.log
+
+# Secrets
+.env
+tokens.json
+auth/pkce_verifier.txt
+auth/tokens.json
+
+# Logs and data
+*.jsonl
+logs/
+training_data/
+data/pivot_alert.json
+data/daily_alpha_log_*.json
+backend/status.json
+
+# Frontend build output
+/frontend/dist/
+
