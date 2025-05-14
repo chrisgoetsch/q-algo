@@ -1,7 +1,7 @@
 # File: tests/test_api.py
 
 import pytest
-from brokers.tradier_client import get_quote
+from core.tradier_client import get_quote
 from core.live_price_tracker import get_current_spy_price
 
 @pytest.mark.asyncio

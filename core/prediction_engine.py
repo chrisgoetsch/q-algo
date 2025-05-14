@@ -1,4 +1,4 @@
-# prediction_engine.py
+# File: core/prediction_engine.py
 # Combines XGBoost + GPT to forecast SPY 0DTE direction + action
 
 import os
@@ -7,8 +7,8 @@ import joblib
 import openai
 import numpy as np
 from dotenv import load_dotenv
-from forecast_logger import log_forecast
-from qthink_scenario_planner import simulate_market_scenario
+from core.forecast_logger import log_forecast
+from core.qthink_scenario_planner import simulate_market_scenario
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -48,14 +48,27 @@ def hybrid_forecast(state_vector: dict) -> dict:
     ml_result = predict_with_model(state_vector)
     gpt_result = forecast_with_gpt(state_vector)
 
-    # Combine or fallback
-    if "error" in ml_result:
+    if "error" in ml_result and "error" in gpt_result:
+        final = {
+            "direction": "unknown",
+            "confidence": 0.5,
+            "method": "fallback",
+            "gpt_rationale": gpt_result.get("error"),
+            "error": ml_result.get("error")
+        }
+    elif "error" in ml_result:
         final = gpt_result
     else:
         final = ml_result
-        final["gpt_rationale"] = gpt_result.get("gpt_rationale")
+        final["gpt_rationale"] = gpt_result.get("gpt_rationale", "")
 
-    log_forecast(state_vector, final)
+    log_forecast(
+        model_name="HybridModel-v1",
+        forecast=final,
+        confidence=final.get("confidence", 0.5),
+        context=state_vector
+    )
+
     return final
 
 if __name__ == "__main__":
@@ -71,4 +84,3 @@ if __name__ == "__main__":
     }
     forecast = hybrid_forecast(test_state)
     print(json.dumps(forecast, indent=2))
-

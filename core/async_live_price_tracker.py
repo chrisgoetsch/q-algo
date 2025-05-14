@@ -1,7 +1,7 @@
 # File: core/async_live_price_tracker.py
 
 from polygon.async_polygon_websocket import SPY_LIVE_PRICE
-from brokers.tradier_client import get_quote
+from core.tradier_client import get_quote
 
 def get_current_spy_price():
     """

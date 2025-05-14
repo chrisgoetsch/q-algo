@@ -1,8 +1,0 @@
-{
-  "conversation_id": "conv_2025-04-12_QThinkPlanning",
-  "topics": ["pattern recall", "forecast modeling"],
-  "user_input": "Can we turn Q-0DTE into a savant?",
-  "gpt_response": "Yes — it should learn from historical setup embeddings...",
-  "relevance_score": 0.92,
-  "agents_involved": ["q_0dte", "qthink"]
-}

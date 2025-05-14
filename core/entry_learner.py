@@ -1,56 +1,144 @@
 # File: core/entry_learner.py
 
-import random
-import json
 import os
-import time
+import pandas as pd
+import joblib
+import json
+import numpy as np
+from analytics.regime_forecaster import forecast_market_regime
+from core.mesh_router import get_mesh_signal
 from datetime import datetime
-from brokers.tradier_client import get_quote
-from core.mesh_router import score_mesh_signals
-from qthink.qthink_inference import generate_trade_reasoning
-from core.market_environment import snapshot_market_environment
-from core.live_price_tracker import get_current_spy_price
-from utils.atomic_write import atomic_append_jsonl
+from polygon.polygon_rest import get_live_price, get_option_metrics, get_dealer_flow_metrics
 
-SYNC_LOG_PATH = "logs/sync_log.jsonl"
+MODEL_PATH = "core/models/entry_model.pkl"
+REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
+SCORE_LOG_PATH = os.getenv("SCORE_LOG_PATH", "logs/qthink_score_breakdown.jsonl")
 
-def evaluate_entry(symbol="SPY", vix_value=18.0):
-    price = get_current_spy_price()
-    if price is None:
-        print(f"[Entry Learner] No live price available for {symbol}")
-        return False
+if os.path.exists(MODEL_PATH):
+    model = joblib.load(MODEL_PATH)
+    print("✅ ML entry model loaded.")
+else:
+    model = None
+    print("⚠️ Warning: entry_model.pkl not found. score_entry will default to zero scoring.")
 
-    print(f"[Entry Learner] Current price of {symbol}: {price}")
+def load_reinforcement_profile():
+    if not os.path.exists(REINFORCEMENT_PROFILE_PATH):
+        return {}
+    try:
+        with open(REINFORCEMENT_PROFILE_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to load reinforcement profile: {e}")
+        return {}
 
-    mesh_score_data = score_mesh_signals(symbol)
-    mesh_score = mesh_score_data.get("score", 0)
-    mesh_trigger_agents = mesh_score_data.get("trigger_agents", [])
-    print(f"[Entry Learner] Mesh Score: {mesh_score} from agents {mesh_trigger_agents}")
-
-    env_snapshot = snapshot_market_environment(vix_value)
-
-    decision = mesh_score >= 65 and env_snapshot.get("vix_level") != "extreme"
-    trade_action = "entry_attempted" if decision else "entry_skipped"
-
-    reasoning = generate_trade_reasoning(
-        symbol=symbol,
-        price=price,
-        mesh_score=mesh_score,
-        trigger_agents=mesh_trigger_agents
-    )
-
-    journal_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "symbol": symbol,
-        "price": price,
-        "mesh_score": mesh_score,
-        "trigger_agents": mesh_trigger_agents,
-        "environment": env_snapshot,
-        "reasoning": reasoning,
-        "decision": "enter_trade" if decision else "skip_trade",
-        "confidence_threshold": 65
+def build_entry_features(context):
+    features = {
+        "price": float(context.get("price", 0) or 0.0),
+        "iv": context.get("iv", 0),
+        "volume": context.get("volume", 0),
+        "skew": context.get("skew", 0),
+        "delta": context.get("delta", 0),
+        "gamma": context.get("gamma", 0),
+        "dealer_flow": context.get("dealer_flow", 0),
+        "mesh_confidence": context.get("mesh_confidence", 0),
     }
-    atomic_append_jsonl(SYNC_LOG_PATH, journal_entry)
+    agent_signals = context.get("agent_signals", {})
+    for agent, score in agent_signals.items():
+        features[f"agent_{agent}"] = score
+    return features
 
-    print(f"[Entry Learner] Decision: {'ENTER' if decision else 'SKIP'} | Reason: {reasoning}")
-    return decision
+def log_score_breakdown(log_data):
+    import numpy as np
+    os.makedirs(os.path.dirname(SCORE_LOG_PATH), exist_ok=True)
+    log_data["timestamp"] = datetime.utcnow().isoformat()
+    # Convert numpy float32/64 to standard float
+    log_data = {
+        k: float(v) if isinstance(v, (np.float32, np.float64)) else v
+        for k, v in log_data.items()
+    }
+    try:
+        with open(SCORE_LOG_PATH, "a") as f:
+            f.write(json.dumps(log_data) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to log score breakdown: {e}")
+
+def score_entry(context):
+    mesh_result = get_mesh_signal(context)
+    context["mesh_confidence"] = mesh_result.get("score", 0)
+    context["agent_signals"] = mesh_result.get("agent_signals", {})
+
+    features = build_entry_features(context)
+    df = pd.DataFrame([features]).astype(float)
+
+    profile = load_reinforcement_profile()
+    mesh_score = context["mesh_confidence"]
+    label_penalties = sum([profile.get(k, 0) for k in ["bad entry", "mesh conflict", "regret"]])
+    label_boosts = sum([profile.get(k, 0) for k in ["strong signal", "profit target"]])
+    suggested_exit_decay = profile.get("suggested_exit_decay", 0.6)
+
+    regime = forecast_market_regime(context)
+    context["regime"] = regime
+    regime_adjust = {
+        "panic": -0.3,
+        "bearish": -0.2,
+        "choppy": -0.1,
+        "stable": 0.0,
+        "bullish": 0.1,
+        "trending": 0.2
+    }
+    regime_mod = regime_adjust.get(regime, 0.0)
+
+    if model:
+        try:
+            raw_score = model.predict_proba(df)[0][1]
+            adjusted_score = raw_score + (0.05 * label_boosts) - (0.05 * label_penalties) + regime_mod
+
+            if suggested_exit_decay < 0.5:
+                adjusted_score += 0.05
+            elif suggested_exit_decay > 0.65:
+                adjusted_score -= 0.05
+
+            final_score = (0.6 * adjusted_score) + (0.4 * mesh_score)
+            rationale = f"ML: {raw_score:.2f}, Adjusted: {adjusted_score:.2f}, Mesh: {mesh_score:.2f}, Regime: {regime}, Final: {final_score:.2f}"
+
+            log_score_breakdown({
+                "features": features,
+                "mesh_score": mesh_score,
+                "raw_score": round(raw_score, 4),
+                "adjusted_score": round(adjusted_score, 4),
+                "final_score": round(final_score, 4),
+                "regime": regime,
+                "rationale": rationale
+            })
+
+            return round(final_score, 4), rationale
+        except Exception as e:
+            print(f"⚠️ Error scoring entry: {e}")
+            return 0.0, "Model error"
+    else:
+        return 0.0, f"No ML model loaded | Regime: {regime}"
+
+def evaluate_entry(symbol="SPY", threshold=0.6):
+    try:
+        price = get_live_price(symbol) or 0.0
+        option_data = get_option_metrics(symbol)
+        dealer_data = get_dealer_flow_metrics(symbol)
+
+        context = {
+            "symbol": symbol,
+            "price": float(price),
+            "iv": option_data.get("iv", 0),
+            "volume": option_data.get("volume", 0),
+            "skew": option_data.get("skew", 0),
+            "delta": option_data.get("delta", 0),
+            "gamma": option_data.get("gamma", 0),
+            "dealer_flow": dealer_data.get("score", 0) if dealer_data else 0
+        }
+
+        score, rationale = score_entry(context)
+        print(f"[Entry Learner] Entry score: {score:.4f} | Threshold: {threshold:.2f} | Rationale: {rationale}")
+        return score >= threshold
+
+    except Exception as e:
+        print(f"[Entry Learner] Failed to evaluate entry for {symbol}: {e}")
+        return False

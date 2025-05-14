@@ -1,92 +1,58 @@
-# trade_engine.py
-# Full lifecycle executor: signal → entry → track → exit → close order
+# File: core/trade_engine.py
 
-import time
-from core.mesh_router import get_mesh_signal
+import os
+from datetime import datetime
 from core.entry_learner import score_entry, build_entry_features
-from core.tradestation_execution import submit_order
-from core.position_manager import evaluate_exit, exit_trade
-from training_data.entry_tracker import log_entry_features
-from training_data.trade_logger import log_trade
-from core.kill_switch import check_kill
-from polygon.polygon_rest import get_atm_strike, get_today_expiry, 
-get_current_price
+from core.tradier_execution import submit_order, get_atm_option_symbol
+from core.capital_manager import get_current_allocation
+from core.live_price_tracker import get_current_spy_price
+from core.position_manager import manage_positions
+from core.mesh_router import get_mesh_signal
+from core.open_trade_tracker import track_open_trade
+from core.logger_setup import logger
 
 SYMBOL = "SPY"
 
-class TradeEngine:
-    def __init__(self):
-        self.logs = []
+def open_position(symbol: str, quantity: int, call_put: str):
+    """
+    Run entry pipeline, calculate confidence, size trade based on capital allocation,
+    and submit live order.
+    """
+    context = {
+        "symbol": symbol,
+        "price": get_current_spy_price(),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    context.update(get_mesh_signal(context))
 
-    def execute(self):
-        if check_kill():
-            print("🛑 Kill switch engaged.")
-            time.sleep(10)
+    features = build_entry_features(context)
+    score, rationale = score_entry(context)
+    allocation = get_current_allocation()
+
+    print(f"[ENTRY] Score: {score:.2f} | Alloc: {allocation:.2f} | Rationale: {rationale}")
+
+    if score >= 0.7:
+        qty = quantity
+
+        # Get Tradier-compliant ATM option symbol
+        option_symbol = get_atm_option_symbol(symbol=symbol, call_put=call_put)
+        context["option_symbol"] = option_symbol
+
+        if not option_symbol:
+            logger.warning({"event": "missing_option_symbol", "context": context})
+            print("⚠️ No valid option symbol returned from get_atm_option_symbol().")
             return
 
-        signal = get_mesh_signal(symbol=SYMBOL)
-        if signal["score"] < 0.6:
-            print("⚠️ Mesh signal too weak.")
-            time.sleep(10)
-            return
+        print(f"[ORDER] Submitting {qty} × {option_symbol}")
+        order = submit_order(option_symbol=option_symbol, quantity=qty, action="buy_to_open")
 
-        features = build_entry_features(signal)
-        entry_score = score_entry(features)
-        features["model_score"] = entry_score
-
-        if entry_score < 0.6:
-            print(f"🧠 Entry model score too low: {entry_score}")
-            time.sleep(10)
-            return
-
-        strike = get_atm_strike()
-        expiry = get_today_expiry()
-        order = submit_order(SYMBOL, signal["direction"], strike, expiry)
-        if not order:
-            print("❌ Order failed")
-            return
-
-        trade_id = order.get("order_id", f"trade_{int(time.time())}")
-
-        trade = {
-            "id": trade_id,
-            "symbol": SYMBOL,
-            "direction": signal["direction"],
-            "strike": strike,
-            "expiry": expiry,
-            "entry_time": time.time(),
-            "entry_price": get_current_price(SYMBOL).get("results", {}).get("p", 
-440),
-            "capital_pct": 0.2,
-            "agents": signal.get("agents", []),
-            "mesh_signal": signal,
-            "take_profit": signal.get("tp"),
-            "stop_loss": signal.get("sl")
-        }
-
-        log_trade({"trade_id": trade_id, "entry_score": signal["score"]}, 
-mesh_signal=signal)
-        log_entry_features(features, trade_id, mesh_signal=signal)
-        print(f"✅ Trade entered: {trade_id}")
-
-        hold_time = 0
-        while hold_time < 600:
-            trade["current_price"] = get_current_price(SYMBOL).get("results", 
-{}).get("p", trade["entry_price"])
-            exit_check = evaluate_exit(trade)
-            if exit_check.get("exit_now"):
-                exit_trade(trade_id, trade, mesh_signal=signal)
-                break
-            time.sleep(5)
-            hold_time += 5
-
-        self.logs.append({"trade_id": trade_id, "duration_sec": hold_time, 
-"timestamp": time.time()})
-        print("🔁 Restarting loop...")
-        time.sleep(5)
+        if order:
+            print(f"✅ Order confirmed: {order}")
+            context["capital_allocated"] = allocation
+            track_open_trade(option_symbol, context)
+        else:
+            print("🛑 Order failed")
 
 if __name__ == "__main__":
-    engine = TradeEngine()
-    while True:
-        engine.execute()
-
+    open_position(SYMBOL, 1, "C")
+    manage_positions()

@@ -1,0 +1,22 @@
+{
+  "q_block": {
+    "score": 85,
+    "enabled": true
+  },
+  "q_trap": {
+    "score": 70,
+    "enabled": true
+  },
+  "q_quant": {
+    "score": 60,
+    "enabled": true
+  },
+  "q_precision": {
+    "score": 90,
+    "enabled": true
+  },
+  "q_scout": {
+    "score": 75,
+    "enabled": true
+  }
+}
