@@ -1,8 +1,30 @@
+// tailwind.config.js
+
 /** @type {import('tailwindcss').Config} */
-export default {
-  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+module.exports = {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}"
+  ],
+  darkMode: 'class',
   theme: {
-    extend: {},
+    extend: {
+      colors: {
+        profit: '#16a34a',
+        loss: '#dc2626',
+        mesh: '#facc15',
+        gpt: '#38bdf8',
+      },
+      fontFamily: {
+        mono: ['Roboto Mono', 'ui-monospace', 'SFMono-Regular'],
+      },
+      boxShadow: {
+        panel: '0 0 10px rgba(0,0,0,0.6)',
+      },
+    },
   },
-  plugins: [],
+  plugins: [
+    require('@tailwindcss/forms'),
+    require('@tailwindcss/typography'),
+  ],
 }

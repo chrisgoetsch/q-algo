@@ -3,15 +3,14 @@
 import os
 import json
 from datetime import datetime
+from time import sleep
 from core.live_price_tracker import get_current_spy_price
+from analytics.qthink_cluster_analysis import analyze_trade_with_gpt
 
 BACKTEST_LOG_FOLDER = "logs/backtests/"
 os.makedirs(BACKTEST_LOG_FOLDER, exist_ok=True)
 
 def simulate_live_entry(symbol="SPY", call_put="C", expiration=None):
-    """
-    Simulate entering a position using real-time SPY pricing.
-    """
     current_price = get_current_spy_price()
     if current_price is None:
         print("[Backtest] No live price available — cannot simulate entry.")
@@ -27,10 +26,7 @@ def simulate_live_entry(symbol="SPY", call_put="C", expiration=None):
     print(f"[Backtest] Simulated entry: {entry_data}")
     return entry_data
 
-def simulate_live_exit(entry_data, target_profit=20, stop_loss=-10, vix_value=18.0):
-    """
-    Simulate exiting a position using real-time SPY pricing and simple rules.
-    """
+def simulate_live_exit(entry_data, target_profit=0.01, stop_loss=-0.01, vix_value=18.0):
     current_price = get_current_spy_price()
     if current_price is None or not entry_data:
         print("[Backtest] No live price available or missing entry data — cannot simulate exit.")
@@ -42,7 +38,6 @@ def simulate_live_exit(entry_data, target_profit=20, stop_loss=-10, vix_value=18
     exit_now = False
     exit_reason = ""
 
-    # Optional: tighten based on VIX
     if vix_value > 25:
         stop_loss = -5
 
@@ -71,27 +66,31 @@ def simulate_live_exit(entry_data, target_profit=20, stop_loss=-10, vix_value=18
     return exit_data
 
 def record_backtest_result(entry_data, exit_data):
-    """
-    Save the entry and exit simulation to backtest logs.
-    """
     today = datetime.utcnow().strftime("%Y-%m-%d")
     path = os.path.join(BACKTEST_LOG_FOLDER, f"{today}_live_backtest.jsonl")
 
+    result = {
+        "entry": entry_data,
+        "exit": exit_data,
+    }
+
+    try:
+        gpt_feedback = analyze_trade_with_gpt(entry_data, exit_data)
+        result["qthink_feedback"] = gpt_feedback
+        print(f"[Backtest] QThink Feedback: {gpt_feedback}")
+    except Exception as e:
+        print(f"[Backtest] GPT Feedback error: {e}")
+        result["qthink_feedback"] = {"error": str(e)}
+
     with open(path, "a") as f:
-        f.write(json.dumps({
-            "entry": entry_data,
-            "exit": exit_data
-        }) + "\n")
+        f.write(json.dumps(result) + "\n")
 
     print(f"[Backtest] Recorded simulation to {path}")
 
 if __name__ == "__main__":
     entry = simulate_live_entry(symbol="SPY")
     if entry:
-        # Wait a few seconds to simulate holding period
-        import time
-        time.sleep(5)
-
+        sleep(5)
         exit_data = simulate_live_exit(entry)
         if exit_data:
             record_backtest_result(entry, exit_data)

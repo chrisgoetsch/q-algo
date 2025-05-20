@@ -24,15 +24,6 @@ def validate_env():
         'TRADIER_ACCOUNT_ID': 'Tradier account ID',
     }
 
-    if broker == "tradestation":
-        required.update({
-            'TRADESTATION_CLIENT_ID': 'TradeStation API client ID',
-            'TRADESTATION_CLIENT_SECRET': 'TradeStation API client secret',
-            'TRADESTATION_ACCOUNT_ID': 'TradeStation account ID',
-            'TRADESTATION_ACCESS_TOKEN': 'TradeStation access token',
-            'TRADESTATION_REFRESH_TOKEN': 'TradeStation refresh token',
-        })
-
     missing = []
     for var, desc in required.items():
         val = os.getenv(var)

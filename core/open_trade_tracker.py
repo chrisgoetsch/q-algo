@@ -22,9 +22,9 @@ def atomic_write_line(filepath, line_data):
     except Exception as e:
         print(f"❌ Failed to write open trade log: {e}")
 
-def log_open_trade(trade_id, agent, direction, strike, expiry):
+def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
     """
-    Legacy-compatible entry tracker.
+    Logs a basic open trade with optional metadata.
     """
     entry = {
         "trade_id": trade_id,
@@ -32,7 +32,8 @@ def log_open_trade(trade_id, agent, direction, strike, expiry):
         "direction": direction,
         "strike": strike,
         "expiry": expiry,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "meta": meta or {}
     }
     atomic_write_line(FILE, entry)
 
@@ -48,7 +49,6 @@ def track_open_trade(symbol, context):
         pnl = context.get("pnl", 0.0)
         entry_time = context.get("timestamp", datetime.utcnow().isoformat())
 
-        # Ensure minimum fields are present for manage_positions recovery
         entry = {
             "trade_id": trade_id,
             "symbol": symbol,

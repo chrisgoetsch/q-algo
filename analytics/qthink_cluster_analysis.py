@@ -112,7 +112,9 @@ def run_cluster_analysis():
 
 def log_gpt_exit_recommendation(reply: str):
     log_path = "logs/qthink_journal_summary.json"
+    profile_path = "training_data/reinforcement_profile.json"
     today = datetime.utcnow().strftime("%Y-%m-%d")
+
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "type": "exit_threshold_analysis",
@@ -122,6 +124,7 @@ def log_gpt_exit_recommendation(reply: str):
     }
 
     try:
+        # Append to insights log
         if os.path.exists(log_path):
             with open(log_path, "r") as f:
                 data = json.load(f)
@@ -132,6 +135,73 @@ def log_gpt_exit_recommendation(reply: str):
 
         with open(log_path, "w") as f:
             json.dump(data, f, indent=2)
+
         logger.info(f"📝 GPT output saved to {log_path}")
     except Exception as e:
-        logger.error(f"⚠️ Failed to write GPT log: {e}")
+        logger.error(f"⚠️ Failed to write GPT journal: {e}")
+
+    # 🔁 Update reinforcement profile with decay threshold if possible
+    try:
+        if "0." in reply:
+            import re
+            matches = re.findall(r"0\.\d+", reply)
+            thresholds = [float(x) for x in matches if 0.0 < float(x) < 1.0]
+            suggested = min(thresholds, key=lambda x: abs(x - 0.6)) if thresholds else None
+        else:
+            suggested = None
+
+        if suggested:
+            if os.path.exists(profile_path):
+                with open(profile_path, "r") as f:
+                    profile = json.load(f)
+            else:
+                profile = {}
+
+            profile["suggested_exit_decay"] = round(suggested, 3)
+            with open(profile_path, "w") as f:
+                json.dump(profile, f, indent=2)
+
+            logger.info(f"🧠 Reinforcement profile updated with suggested_exit_decay: {suggested:.3f}")
+        else:
+            logger.warning("⚠️ No numeric threshold extracted from GPT reply.")
+    except Exception as e:
+        logger.error(f"⚠️ Failed to update reinforcement profile: {e}")
+
+def analyze_trade_with_gpt(entry_data, exit_data):
+    """
+    Use GPT to generate feedback on a trade's entry and exit.
+    """
+    import openai
+    import os
+
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = os.getenv("GPT_MODEL", "gpt-4o")
+
+    prompt = f"""
+You are a trading analyst. Evaluate the following SPY 0DTE trade:
+
+Entry Time: {entry_data['timestamp']}
+Entry Price: {entry_data['price']}
+Exit Time: {exit_data['timestamp']}
+Exit Price: {exit_data['exit_price']}
+PnL: {exit_data['pnl_percentage']:.2f}%
+Exit Reason: {exit_data['exit_reason']}
+
+Was this a good trade? Briefly explain strengths, weaknesses, and potential improvements.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        return {
+            "feedback": response.choices[0].message.content.strip(),
+            "model": model,
+            "pnl": exit_data['pnl_percentage'],
+            "regret_tag": "low" if exit_data["pnl_percentage"] > 0 else "high"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
