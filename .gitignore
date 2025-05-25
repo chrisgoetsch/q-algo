@@ -1,23 +1,31 @@
-# System files
+# --- System & Python ---
 .DS_Store
 __pycache__/
 *.pyc
 *.log
+*.zip
 
-# Secrets
+# --- Secrets & Tokens ---
 .env
+qalgo-key.pem
 tokens.json
 auth/pkce_verifier.txt
 auth/tokens.json
 
-# Logs and data
+# --- Training / Runtime Logs ---
 *.jsonl
 logs/
 training_data/
+backups/
 data/pivot_alert.json
 data/daily_alpha_log_*.json
 backend/status.json
 
-# Frontend build output
-/frontend/dist/
+# --- Virtual Environments & Dependencies ---
+.venv/
+venv/
+node_modules/
+package-lock.json
 
+# --- Frontend Build Artifacts ---
+/frontend/dist/

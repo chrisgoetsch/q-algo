@@ -1,5 +1,8 @@
 #!/bin/bash
 
+echo "🔄 Activating virtual environment..."
+source ~/q-algo-v2/venv/bin/activate
+
 echo "🔄 Sourcing environment..."
 source .env
 
