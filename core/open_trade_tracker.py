@@ -62,7 +62,7 @@ def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
         "timestamp": datetime.utcnow().isoformat(),
         "meta": meta or {}
     }
-    atomic_write_line(FILE, entry)
+    atomic_write_line(OPEN_TRADES_PATH, entry)
 
 
 def track_open_trade(symbol, context):
@@ -92,7 +92,7 @@ def track_open_trade(symbol, context):
             "entry_context": context
         }
 
-        atomic_write_line(FILE, entry)
+        atomic_write_line(OPEN_TRADES_PATH, entry)
         print(f"🟢 Tracked open trade: {symbol} (ID: {trade_id})")
 
     except Exception as e:
@@ -140,14 +140,16 @@ def load_open_trades(path=OPEN_TRADES_PATH):
 
 def remove_trade(trade_id):
     """
-    Removes a trade entry by its ID.
+    Removes a trade entry by its ID and rewrites the file.
     """
     trades = load_open_trades()
     updated = [t for t in trades if t.get("trade_id") != trade_id]
+    
     try:
-        with open(FILE, "w") as f:
+        with open(OPEN_TRADES_PATH, "w") as f:
             for t in updated:
                 f.write(json.dumps(t) + "\n")
         print(f"🧹 Removed trade: {trade_id}")
     except Exception as e:
-        print(f"⚠️ Failed to rewrite open_trades.jsonl: {e}")
+        print(f"⚠️ Failed to rewrite {OPEN_TRADES_PATH}: {e}")
+

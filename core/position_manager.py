@@ -20,6 +20,7 @@ from analytics.qthink_feedback_loop import process_trade_for_learning
 from core.gpt_exit_analyzer import analyze_exit_with_gpt
 from polygon.websocket_manager import get_price
 from core.mesh_optimizer import evaluate_agents  # NEW: hook in mesh_optimizer
+from analytics.qthink_feedback_loop import load_reinforcement_profile
 
 LOGS_DIR = "logs"
 RUNTIME_STATE_PATH = os.path.join(LOGS_DIR, "runtime_state.json")
