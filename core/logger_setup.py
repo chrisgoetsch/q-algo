@@ -42,3 +42,10 @@ def setup_logging(log_dir="logs", log_file="app.log"):
 
 # Initialize root logger on import
 logger = setup_logging()
+
+def atomic_append_json(filepath, line_data):
+    try:
+        with open(filepath, "a") as f:
+            f.write(json.dumps(line_data) + "\n")
+    except Exception as e:
+        print(f"❌ Failed to write mesh signal log: {e}")

@@ -4,16 +4,56 @@ import os
 import json
 import requests
 from datetime import datetime
+from polygon.polygon_rest import get_option_metrics
+from analytics.model_audit import analyze_by_model, load_trades
 
 CAPITAL_TRACKER_PATH = os.getenv("CAPITAL_TRACKER_PATH", "logs/capital_tracker.json")
 EQUITY_BASELINE_PATH = os.getenv("EQUITY_BASELINE_PATH", "logs/equity_baseline.json")
 
+MODEL_VERSION = "entry-model-v1.0"
+
+
+def get_latest_win_rate(version=MODEL_VERSION) -> float:
+    try:
+        trades = load_trades()
+        summary = analyze_by_model(trades)
+        return summary.get(version, {}).get("win_rate", 0.5)
+    except Exception as e:
+        print(f"⚠️ Failed to fetch model win rate: {e}")
+        return 0.5
+
+
+def parse_account_balances(data):
+    balances = data.get("balances", {})
+    equity_keys = ["equity", "account_value", "total_equity", "cash_available"]
+    equity = 0.0
+    for key in equity_keys:
+        try:
+            val = balances.get(key)
+            if isinstance(val, dict):
+                for subval in val.values():
+                    if isinstance(subval, (int, float)):
+                        equity = max(equity, subval)
+            else:
+                equity = float(val)
+            if equity > 0:
+                break
+        except:
+            continue
+
+    buying_power = float(balances.get("margin", {}).get("option_buying_power", 0.0))
+    return buying_power, equity
+
 
 def get_current_allocation(default: float = 0.2) -> float:
-    """
-    Reads the most recent QThink capital multiplier from capital_tracker.json.
-    Clamps allocation to safe range [0.0, 1.0].
-    """
+    model_win_rate = get_latest_win_rate()
+    if model_win_rate < 0.4:
+        print("⚠️ Model underperforming. Reducing allocation.")
+        return 0.1
+    if model_win_rate > 0.7:
+        print("🔥 Model strong. Boosting allocation.")
+        return 0.3
+
     if not os.path.exists(CAPITAL_TRACKER_PATH):
         return default
     try:
@@ -37,9 +77,6 @@ def log_allocation_update(recommended: float,
                           confidence_score: float = 0.0,
                           regret_risk: float = 0.0,
                           meta: dict = None):
-    """
-    Logs a capital scaling event with full GPT/ML reasoning metadata.
-    """
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "recommended_allocation": round(recommended, 3),
@@ -63,21 +100,18 @@ def log_allocation_update(recommended: float,
 def adjust_allocation_from_signal(win_rate: float, volatility_score: float, drawdown: float,
                                    mesh_density: float, confidence_score: float = 0.5, regret_risk: float = 0.5) -> float:
     base = 0.2
-
     if win_rate > 0.65 and drawdown < 0.1:
         base += 0.1
     if confidence_score > 0.75:
         base += 0.05
     if regret_risk < 0.2:
         base += 0.05
-
     if drawdown > 0.2:
         base -= 0.1
     if volatility_score > 0.6:
         base -= 0.1
     if regret_risk > 0.5:
         base -= 0.05
-
     return max(0.05, min(round(base, 3), 1.0))
 
 
@@ -90,7 +124,6 @@ def compute_position_size(base_allocation: float, mesh_agent_score: float,
         tier_boost += 0.05
     if mesh_agent_score < 0.5:
         tier_boost -= 0.05
-
     adjusted = base_allocation + tier_boost
     return max(0.05, min(round(adjusted, 3), max_position_fraction))
 
@@ -127,7 +160,7 @@ def save_equity_baseline(value: float):
         print(f"❌ Failed to save equity baseline: {e}")
 
 
-def get_tradier_buying_power() -> float:
+def get_tradier_buying_power(verbose=False) -> tuple[float, float]:
     TRADIER_API_BASE = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
     TRADIER_ACCESS_TOKEN = os.getenv("TRADIER_ACCESS_TOKEN")
     TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
@@ -137,12 +170,24 @@ def get_tradier_buying_power() -> float:
         "Authorization": f"Bearer {TRADIER_ACCESS_TOKEN}",
         "Accept": "application/json"
     }
-
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
-        return float(data.get("balances", {}).get("margin", {}).get("option_buying_power", 0))
+        if verbose:
+            print("📊 Tradier Balance Response:", json.dumps(data, indent=2))
+
+        buying_power, equity = parse_account_balances(data)
+        print(f"✅ Tradier buying power: ${buying_power:,.2f} | Equity: ${equity:,.2f}")
+        return buying_power, equity
     except Exception as e:
-        print(f"⚠️ Failed to retrieve Tradier buying power: {e}")
+        print(f"⚠️ Failed to retrieve Tradier balance info: {e}")
         return 0.0
+
+
+def scale_allocation_by_volatility(symbol: str, target_iv: float = 0.3) -> float:
+    option_data = get_option_metrics(symbol)
+    current_iv = option_data.get("iv", 0.3)
+    vol_scale = target_iv / current_iv if current_iv > 0 else 1.0
+    allocation = 0.2 * vol_scale
+    return max(0.05, min(round(allocation, 3), 1.0))

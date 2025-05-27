@@ -16,4 +16,6 @@ if [ $EXIT_CODE -ne 0 ]; then
 fi
 
 echo "✅ Preflight passed. Launching Q-ALGO..."
-python3 run_q_algo_live.py
+. .venv/bin/activate
+$(which python) run_q_algo_live_async.py
+

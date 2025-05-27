@@ -8,11 +8,14 @@ import numpy as np
 from analytics.regime_forecaster import forecast_market_regime
 from core.mesh_router import get_mesh_signal
 from datetime import datetime
-from polygon.polygon_rest import get_live_price, get_option_metrics, get_dealer_flow_metrics
+from polygon.polygon_rest import get_option_metrics, get_dealer_flow_metrics
+import asyncio
+from polygon.websocket_manager import get_price
 
 MODEL_PATH = "core/models/entry_model.pkl"
 REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
 SCORE_LOG_PATH = os.getenv("SCORE_LOG_PATH", "logs/qthink_score_breakdown.jsonl")
+MODEL_VERSION = "entry-model-v1.0"
 
 if os.path.exists(MODEL_PATH):
     model = joblib.load(MODEL_PATH)
@@ -20,6 +23,9 @@ if os.path.exists(MODEL_PATH):
 else:
     model = None
     print("⚠️ Warning: entry_model.pkl not found. score_entry will default to zero scoring.")
+
+def get_model_version():
+    return MODEL_VERSION
 
 def load_reinforcement_profile():
     if not os.path.exists(REINFORCEMENT_PROFILE_PATH):
@@ -32,33 +38,25 @@ def load_reinforcement_profile():
         return {}
 
 def build_entry_features(context):
-    features = {
-        "price": float(context.get("price", 0) or 0.0),
-        "iv": context.get("iv", 0),
-        "volume": context.get("volume", 0),
-        "skew": context.get("skew", 0),
-        "delta": context.get("delta", 0),
-        "gamma": context.get("gamma", 0),
-        "dealer_flow": context.get("dealer_flow", 0),
-        "mesh_confidence": context.get("mesh_confidence", 0),
-    }
+    keys = ["price", "iv", "volume", "skew", "delta", "gamma", "dealer_flow",
+            "mesh_confidence", "mesh_score", "alpha_decay"]
+    features = {k: float(context.get(k, 0)) for k in keys}
     agent_signals = context.get("agent_signals", {})
     for agent, score in agent_signals.items():
         features[f"agent_{agent}"] = score
     return features
 
-def log_score_breakdown(log_data):
-    import numpy as np
+async def log_score_breakdown_async(log_data):
     os.makedirs(os.path.dirname(SCORE_LOG_PATH), exist_ok=True)
     log_data["timestamp"] = datetime.utcnow().isoformat()
-    # Convert numpy float32/64 to standard float
+    log_data["model_version"] = MODEL_VERSION
     log_data = {
         k: float(v) if isinstance(v, (np.float32, np.float64)) else v
         for k, v in log_data.items()
     }
     try:
-        with open(SCORE_LOG_PATH, "a") as f:
-            f.write(json.dumps(log_data) + "\n")
+        async with asyncio.to_thread(open, SCORE_LOG_PATH, "a") as f:
+            await asyncio.to_thread(f.write, json.dumps(log_data) + "\n")
     except Exception as e:
         print(f"⚠️ Failed to log score breakdown: {e}")
 
@@ -66,6 +64,8 @@ def score_entry(context):
     mesh_result = get_mesh_signal(context)
     context["mesh_confidence"] = mesh_result.get("score", 0)
     context["agent_signals"] = mesh_result.get("agent_signals", {})
+    context["mesh_score"] = context.get("mesh_confidence", 0)
+    context["alpha_decay"] = context.get("alpha_decay", 0.1)
 
     features = build_entry_features(context)
     df = pd.DataFrame([features]).astype(float)
@@ -98,10 +98,11 @@ def score_entry(context):
             elif suggested_exit_decay > 0.65:
                 adjusted_score -= 0.05
 
-            final_score = (0.6 * adjusted_score) + (0.4 * mesh_score)
+            final_score = (0.6 * adjusted_score) + (0.4 * (mesh_score / 100))
+
             rationale = f"ML: {raw_score:.2f}, Adjusted: {adjusted_score:.2f}, Mesh: {mesh_score:.2f}, Regime: {regime}, Final: {final_score:.2f}"
 
-            log_score_breakdown({
+            asyncio.create_task(log_score_breakdown_async({
                 "features": features,
                 "mesh_score": mesh_score,
                 "raw_score": round(raw_score, 4),
@@ -109,7 +110,7 @@ def score_entry(context):
                 "final_score": round(final_score, 4),
                 "regime": regime,
                 "rationale": rationale
-            })
+            }))
 
             return round(final_score, 4), rationale
         except Exception as e:
@@ -118,11 +119,11 @@ def score_entry(context):
     else:
         return 0.0, f"No ML model loaded | Regime: {regime}"
 
-def evaluate_entry(symbol="SPY", threshold=0.6):
+async def evaluate_entry(symbol="SPY", threshold=0.6):
     try:
-        price = get_live_price(symbol) or 0.0
-        option_data = get_option_metrics(symbol)
-        dealer_data = get_dealer_flow_metrics(symbol)
+        price = get_price("SPY")
+        option_data = await asyncio.to_thread(get_option_metrics, symbol)
+        dealer_data = await asyncio.to_thread(get_dealer_flow_metrics, symbol)
 
         context = {
             "symbol": symbol,
@@ -135,7 +136,7 @@ def evaluate_entry(symbol="SPY", threshold=0.6):
             "dealer_flow": dealer_data.get("score", 0) if dealer_data else 0
         }
 
-        score, rationale = score_entry(context)
+        score, rationale = await asyncio.to_thread(score_entry, context)
         print(f"[Entry Learner] Entry score: {score:.4f} | Threshold: {threshold:.2f} | Rationale: {rationale}")
         return score >= threshold
 

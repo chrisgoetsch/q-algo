@@ -7,6 +7,7 @@ from core.resilient_request import resilient_get
 import polygon.polygon_rest as polygon
 from core.logger_setup import logger
 from core.capital_manager import get_tradier_buying_power
+from core.tradier_client import get_account_balances
 
 TRADIER_API_KEY = os.getenv("TRADIER_ACCESS_TOKEN")
 TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
@@ -29,7 +30,7 @@ def submit_order(option_symbol: str, quantity: int, action: str):
         return {"status": "skipped", "reason": "test_mode"}
 
     # 🛡️ Check available funds
-    buying_power = get_tradier_buying_power()
+    buying_power, equity = get_account_balances()
     if buying_power <= 0:
         logger.warning({
             "event": "order_blocked_insufficient_funds",

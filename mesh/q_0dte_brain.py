@@ -1,11 +1,10 @@
 # q_0dte_brain.py
-# Learns and scores SPY 0DTE market state patterns using memory and GPT 
-reflection
+# Learns and scores SPY 0DTE market state patterns using memory and GPT reflection
 
 import json
 from datetime import datetime
-from q_0dte_memory import store_snapshot, fetch_recent_snapshots
-from qthink_pattern_matcher import gpt_reflect_on_patterns
+from mesh.q_0dte_memory import store_snapshot, fetch_recent_snapshots
+from qthink.qthink_pattern_matcher import gpt_reflect_on_patterns
 
 # Optional: advanced scoring engine coming later
 def score_current_state(state_vector: dict) -> dict:

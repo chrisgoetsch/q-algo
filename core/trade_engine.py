@@ -10,8 +10,10 @@ from core.position_manager import manage_positions
 from core.mesh_router import get_mesh_signal
 from core.open_trade_tracker import track_open_trade
 from core.logger_setup import logger
+from core.threshold_manager import get_entry_threshold
 
 SYMBOL = "SPY"
+
 
 def open_position(symbol: str, quantity: int, call_put: str):
     """
@@ -21,9 +23,20 @@ def open_position(symbol: str, quantity: int, call_put: str):
     context = {
         "symbol": symbol,
         "price": get_current_spy_price(),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "call_put": call_put
     }
-    context.update(get_mesh_signal(context))
+
+    # Mesh signals include score, triggered agents, agent scores, and signal_ids
+    mesh_output = get_mesh_signal(context)
+    context.update(mesh_output)
+
+    # Inject primary signal_id (you can choose a strategy; here we take the top agent if any)
+    top_agents = mesh_output.get("trigger_agents", [])
+    signal_ids = mesh_output.get("signal_ids", {})
+
+    if top_agents:
+        context["signal_id"] = signal_ids.get(top_agents[0])
 
     features = build_entry_features(context)
     score, rationale = score_entry(context)
@@ -31,7 +44,7 @@ def open_position(symbol: str, quantity: int, call_put: str):
 
     print(f"[ENTRY] Score: {score:.2f} | Alloc: {allocation:.2f} | Rationale: {rationale}")
 
-    if score >= 0.7:
+    if score >= get_entry_threshold():
         qty = quantity
 
         # Get Tradier-compliant ATM option symbol
@@ -52,6 +65,7 @@ def open_position(symbol: str, quantity: int, call_put: str):
             track_open_trade(option_symbol, context)
         else:
             print("🛑 Order failed")
+
 
 if __name__ == "__main__":
     open_position(SYMBOL, 1, "C")

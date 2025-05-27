@@ -1,30 +1,30 @@
-# File: core/live_price_tracker.py
+# core/live_price_tracker.py
 
-import time
-from polygon.polygon_websocket import SPY_LIVE_PRICE
-from core.tradier_client import get_quote
+import asyncio
+import websockets
+import json
+import os
+
+API_KEY = os.getenv("POLYGON_API_KEY")
+latest_price = {"SPY": 0.0}  # Shared memory
+
+async def price_listener():
+    uri = f"wss://socket.polygon.io/stocks"
+    async with websockets.connect(uri) as websocket:
+        await websocket.send(json.dumps({"action": "auth", "params": API_KEY}))
+        await websocket.send(json.dumps({"action": "subscribe", "params": "T.SPY"}))
+        print("🔌 Connected to Polygon WebSocket for SPY")
+
+        while True:
+            try:
+                message = await websocket.recv()
+                data = json.loads(message)
+                for event in data:
+                    if event.get("ev") == "T" and event.get("sym") == "SPY":
+                        latest_price["SPY"] = event["p"]
+            except Exception as e:
+                print(f"[WebSocket Error] {e}")
+                await asyncio.sleep(5)
 
 def get_current_spy_price():
-    """
-    Get the best available SPY price:
-    - Try live WebSocket price first
-    - Fallback to Tradier REST quote if live unavailable
-    """
-    live_price = SPY_LIVE_PRICE.get("price")
-    live_timestamp = SPY_LIVE_PRICE.get("timestamp")
-
-    if live_price and live_timestamp:
-        return live_price
-
-    # Fallback: Tradier REST call
-    quote = get_quote("SPY")
-    if quote and "quotes" in quote:
-        return quote["quotes"]["quote"]["last"]
-
-    return None
-
-if __name__ == "__main__":
-    while True:
-        price = get_current_spy_price()
-        print(f"[Live Price Tracker] SPY Current Price: {price}")
-        time.sleep(1)
+    return latest_price.get("SPY", 0.0)

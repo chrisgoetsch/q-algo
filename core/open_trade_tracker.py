@@ -1,26 +1,53 @@
-# File: core/open_trade_tracker.py
-# Q-ALGO v2 — Tracks open trades with atomic write + recovery fallback
-
-import json
 import os
+import json
 from datetime import datetime
+from core.tradier_client import get_positions
 
-FILE = os.getenv("OPEN_TRADES_FILE_PATH", "logs/open_trades.jsonl")
+OPEN_TRADES_PATH = "logs/open_trades.jsonl"
+
+def sync_open_trades_with_tradier():
+    positions = get_positions()
+    if not positions:
+        print("🟡 No open positions found or invalid response.")
+        return
+
+    for pos in positions:
+        if isinstance(pos, dict) and pos.get("symbol", "").startswith("SPY") and pos.get("quantity", 0) > 0:
+            print(f"📥 Syncing open trade: {pos['symbol']} x{pos['quantity']}")
+        else:
+            print(f"⚠️ Skipped malformed or irrelevant position: {pos}")
+
+    clean_positions = []
+    for pos in positions:
+        if isinstance(pos, dict) and pos.get("symbol", "").startswith("SPY") and pos.get("quantity", 0) > 0:
+            print(f"📥 Syncing open trade: {pos['symbol']} x{pos['quantity']}")
+            clean_positions.append({
+                "symbol": pos["symbol"],
+                "quantity": pos["quantity"],
+                "entry_time": datetime.utcnow().isoformat(),
+                "mesh_score": 50,  # Placeholder if needed
+                "trade_id": f"{pos['symbol']}_{datetime.utcnow().isoformat()}"
+            })
+
+    # Write clean file
+    os.makedirs(os.path.dirname(OPEN_TRADES_PATH), exist_ok=True)
+    with open(OPEN_TRADES_PATH, "w") as f:
+        for trade in clean_positions:
+            f.write(json.dumps(trade) + "\n")
+
+    print(f"🔄 Synced {len(clean_positions)} live trades from Tradier → open_trades.jsonl")
+
 
 def atomic_write_line(filepath, line_data):
     """
-    Atomically appends a single JSON line to the file,
-    and writes a backup .tmp file in case of interruption.
+    Atomically appends a single JSON line to the file.
     """
     try:
-        tmp_path = filepath + ".tmp"
-        with open(tmp_path, "w") as f:
-            f.write(json.dumps(line_data) + "\n")
-        os.replace(tmp_path, filepath)
         with open(filepath, "a") as f:
             f.write(json.dumps(line_data) + "\n")
     except Exception as e:
         print(f"❌ Failed to write open trade log: {e}")
+
 
 def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
     """
@@ -37,6 +64,7 @@ def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
     }
     atomic_write_line(FILE, entry)
 
+
 def track_open_trade(symbol, context):
     """
     Mesh-aware trade tracker for entry logs.
@@ -44,7 +72,7 @@ def track_open_trade(symbol, context):
     """
     try:
         trade_id = context.get("trade_id", f"{symbol}_{datetime.utcnow().isoformat()}")
-        direction = context.get("direction", "long")
+        direction = context.get("direction") or ("long" if context.get("call_put") == "C" else "short")
         mesh_score = context.get("mesh_score", 100)
         pnl = context.get("pnl", 0.0)
         entry_time = context.get("timestamp", datetime.utcnow().isoformat())
@@ -56,33 +84,59 @@ def track_open_trade(symbol, context):
             "direction": direction,
             "mesh_score": mesh_score,
             "pnl": pnl,
-            "quantity": 1,
+            "quantity": context.get("quantity", 1),
+            "option_symbol": context.get("option_symbol"),
+            "strike": context.get("strike"),
+            "expiry": context.get("expiry"),
+            "signal_id": context.get("signal_id"),
             "entry_context": context
         }
 
         atomic_write_line(FILE, entry)
         print(f"🟢 Tracked open trade: {symbol} (ID: {trade_id})")
+
     except Exception as e:
         print(f"⚠️ Failed to track open trade: {e}")
 
-def load_open_trades():
+
+def is_expired(option_symbol: str) -> bool:
     """
-    Loads the list of open trades from file.
-    Automatically resets corrupted file.
+    Checks if the option symbol is expired based on today's date.
+    Assumes format like SPY250527C00430000 → 25-05-27
     """
     try:
-        if not os.path.exists(FILE):
-            return []
-        with open(FILE, "r") as f:
-            return [json.loads(line) for line in f if line.strip()]
-    except json.JSONDecodeError:
-        print(f"⚠️ JSON decode error in {FILE}, resetting...")
-        with open(FILE, "w") as f:
-            f.write("")
-        return []
+        expiry_str = option_symbol[3:9]  # Extract YYMMDD
+        expiry_date = datetime.strptime(expiry_str, "%y%m%d").date()
+        return expiry_date < datetime.utcnow().date()
     except Exception as e:
-        print(f"❌ Failed to load open trades: {e}")
+        print(f"⚠️ Failed to parse expiry from {option_symbol}: {e}")
+        return True  # Treat parse errors as expired
+
+def load_open_trades(path=OPEN_TRADES_PATH):
+    """
+    Loads and filters open trades from JSONL.
+    Filters out any expired contracts based on option symbol.
+    Returns a list of valid trade dicts.
+    """
+    if not os.path.exists(path):
+        print(f"⚠️ {path} not found. Returning empty trade list.")
         return []
+
+    valid_trades = []
+    with open(path, "r") as f:
+        for line in f:
+            try:
+                trade = json.loads(line)
+                symbol = trade.get("symbol", trade.get("trade_id", ""))
+                if is_expired(symbol):
+                    print(f"🪦 Skipping expired option: {symbol}")
+                    continue
+                valid_trades.append(trade)
+            except Exception as e:
+                print(f"⚠️ Skipping malformed trade line: {e}")
+
+    return valid_trades
+
 
 def remove_trade(trade_id):
     """
