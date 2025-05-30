@@ -1,4 +1,4 @@
-# File: core/entry_learner.py
+# ✅ Updated: core/entry_learner.py with error handling and safe feature construction
 
 import os
 import pandas as pd
@@ -10,7 +10,12 @@ from core.mesh_router import get_mesh_signal
 from datetime import datetime
 from polygon.polygon_rest import get_option_metrics, get_dealer_flow_metrics
 import asyncio
-from polygon.websocket_manager import get_price
+from polygon.polygon_websocket import SPY_LIVE_PRICE
+
+def get_price(symbol="SPY"):
+    mid = SPY_LIVE_PRICE.get("mid")
+    last = SPY_LIVE_PRICE.get("last_trade")
+    return mid or last or 0.0
 
 MODEL_PATH = "core/models/entry_model.pkl"
 REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
@@ -38,13 +43,33 @@ def load_reinforcement_profile():
         return {}
 
 def build_entry_features(context):
-    keys = ["price", "iv", "volume", "skew", "delta", "gamma", "dealer_flow",
-            "mesh_confidence", "mesh_score", "alpha_decay"]
-    features = {k: float(context.get(k, 0)) for k in keys}
-    agent_signals = context.get("agent_signals", {})
-    for agent, score in agent_signals.items():
-        features[f"agent_{agent}"] = score
-    return features
+    try:
+        data = {
+            "price": context.get("price", 0),
+            "iv": context.get("iv", 0),
+            "volume": context.get("volume", 0),
+            "skew": context.get("skew", 0),
+            "delta": context.get("delta", 0),
+            "gamma": context.get("gamma", 0),
+            "dealer_flow": context.get("dealer_flow", 0),
+            "mesh_confidence": context.get("mesh_confidence", 0),
+            "mesh_score": context.get("mesh_score", 0),
+            "alpha_decay": context.get("alpha_decay", 0.1),
+        }
+        df = pd.DataFrame([data])
+
+        agent_signals = context.get("agent_signals", {})
+        for agent, score in agent_signals.items():
+            df[f"agent_{agent}"] = score
+
+        if hasattr(model, "feature_names_in_"):
+            df = df[[col for col in df.columns if col in model.feature_names_in_]]
+
+        return df
+
+    except Exception as e:
+        print(f"⚠️ Error constructing features: {e}")
+        return pd.DataFrame()  # Return empty frame to fail gracefully
 
 async def log_score_breakdown_async(log_data):
     os.makedirs(os.path.dirname(SCORE_LOG_PATH), exist_ok=True)
@@ -67,57 +92,69 @@ def score_entry(context):
     context["mesh_score"] = context.get("mesh_confidence", 0)
     context["alpha_decay"] = context.get("alpha_decay", 0.1)
 
-    features = build_entry_features(context)
-    df = pd.DataFrame([features]).astype(float)
+    try:
+        features = build_entry_features(context)
+        if features.empty:
+            return 0.0, "Feature build error — empty features"
 
-    profile = load_reinforcement_profile()
-    mesh_score = context["mesh_confidence"]
-    label_penalties = sum([profile.get(k, 0) for k in ["bad entry", "mesh conflict", "regret"]])
-    label_boosts = sum([profile.get(k, 0) for k in ["strong signal", "profit target"]])
-    suggested_exit_decay = profile.get("suggested_exit_decay", 0.6)
+        profile = load_reinforcement_profile()
+        mesh_score = context["mesh_confidence"]
 
-    regime = forecast_market_regime(context)
-    context["regime"] = regime
-    regime_adjust = {
-        "panic": -0.3,
-        "bearish": -0.2,
-        "choppy": -0.1,
-        "stable": 0.0,
-        "bullish": 0.1,
-        "trending": 0.2
-    }
-    regime_mod = regime_adjust.get(regime, 0.0)
+        label_penalties = sum([profile.get(k, 0) for k in ["bad entry", "mesh conflict", "regret"]])
+        label_boosts = sum([profile.get(k, 0) for k in ["strong signal", "profit target"]])
+        suggested_exit_decay = profile.get("suggested_exit_decay", 0.6)
 
-    if model:
-        try:
-            raw_score = model.predict_proba(df)[0][1]
-            adjusted_score = raw_score + (0.05 * label_boosts) - (0.05 * label_penalties) + regime_mod
+        regime = forecast_market_regime(context)
+        context["regime"] = regime
+        regime_adjust = {
+            "panic": -0.3,
+            "bearish": -0.2,
+            "choppy": -0.1,
+            "stable": 0.0,
+            "bullish": 0.1,
+            "trending": 0.2
+        }
+        regime_mod = regime_adjust.get(regime, 0.0)
 
-            if suggested_exit_decay < 0.5:
-                adjusted_score += 0.05
-            elif suggested_exit_decay > 0.65:
-                adjusted_score -= 0.05
+        if model:
+            try:
+                raw_score = model.predict_proba(features)[0][1]
+                adjusted_score = raw_score + (0.05 * label_boosts) - (0.05 * label_penalties) + regime_mod
 
-            final_score = (0.6 * adjusted_score) + (0.4 * (mesh_score / 100))
+                if suggested_exit_decay < 0.5:
+                    adjusted_score += 0.05
+                elif suggested_exit_decay > 0.65:
+                    adjusted_score -= 0.05
 
-            rationale = f"ML: {raw_score:.2f}, Adjusted: {adjusted_score:.2f}, Mesh: {mesh_score:.2f}, Regime: {regime}, Final: {final_score:.2f}"
+                final_score = (0.6 * adjusted_score) + (0.4 * (mesh_score / 100))
+                rationale = f"ML: {raw_score:.2f}, Adjusted: {adjusted_score:.2f}, Mesh: {mesh_score:.2f}, Regime: {regime}, Final: {final_score:.2f}"
 
-            asyncio.create_task(log_score_breakdown_async({
-                "features": features,
-                "mesh_score": mesh_score,
-                "raw_score": round(raw_score, 4),
-                "adjusted_score": round(adjusted_score, 4),
-                "final_score": round(final_score, 4),
-                "regime": regime,
-                "rationale": rationale
-            }))
+                try:
+                    from analytics.qthink_log_labeler import log_score_breakdown_async
+                    asyncio.run(log_score_breakdown_async({
+                        "features": features.to_dict(orient="records")[0],
+                        "mesh_score": mesh_score,
+                        "raw_score": round(raw_score, 4),
+                        "adjusted_score": round(adjusted_score, 4),
+                        "final_score": round(final_score, 4),
+                        "regime": regime,
+                        "rationale": rationale
+                    }))
+                except Exception as e:
+                    print(f"⚠️ Failed to log breakdown: {e}")
 
-            return round(final_score, 4), rationale
-        except Exception as e:
-            print(f"⚠️ Error scoring entry: {e}")
-            return 0.0, "Model error"
-    else:
-        return 0.0, f"No ML model loaded | Regime: {regime}"
+                return round(final_score, 4), rationale
+
+            except Exception as e:
+                print(f"⚠️ Error during model prediction: {e}")
+                return 0.0, "Model error"
+        else:
+            return 0.0, f"No ML model loaded | Regime: {regime}"
+
+    except Exception as e:
+        print(f"⚠️ Error building features: {e}")
+        return 0.0, "Feature build error"
+
 
 async def evaluate_entry(symbol="SPY", threshold=0.6):
     try:

@@ -1,11 +1,10 @@
-# File: core/position_manager.py
-
 import os
 import json
 from datetime import datetime
 import asyncio
 
-from core.tradier_client import submit_order, get_positions
+from core.tradier_execution import submit_order
+from core.tradier_client import get_positions, get_order_status
 from analytics.qthink_log_labeler import label_exit_reason, process_and_journal
 from core.trade_logger import log_exit, log_alpha_decay
 from core.mesh_router import score_exit_signals
@@ -18,18 +17,21 @@ from polygon.polygon_rest import get_option_metrics, get_dealer_flow_metrics
 from core.alpha_decay_tracker import calculate_time_decay, calculate_mesh_decay
 from analytics.qthink_feedback_loop import process_trade_for_learning
 from core.gpt_exit_analyzer import analyze_exit_with_gpt
-from polygon.websocket_manager import get_price
-from core.mesh_optimizer import evaluate_agents  # NEW: hook in mesh_optimizer
+from polygon.polygon_websocket import SPY_LIVE_PRICE
+from core.mesh_optimizer import evaluate_agents
 from analytics.qthink_feedback_loop import load_reinforcement_profile
 
 LOGS_DIR = "logs"
 RUNTIME_STATE_PATH = os.path.join(LOGS_DIR, "runtime_state.json")
 SYNC_LOG_PATH = os.path.join(LOGS_DIR, "sync_log.jsonl")
-REINFORCEMENT_PROFILE_PATH = "assistants/reinforcement_profile.json"
 EXIT_ATTEMPTS_LOG = os.path.join(LOGS_DIR, "exit_attempts.jsonl")
-OPEN_TRADES_PATH = "logs/open_trades.jsonl"
+OPEN_TRADES_PATH = os.path.join(LOGS_DIR, "open_trades.jsonl")
+REINFORCEMENT_PROFILE_PATH = "assistants/reinforcement_profile.json"
 
 # --- Utility Logging Functions ---
+
+def get_price():
+    return SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade") or 0.0
 
 def log_exit_attempt(symbol, qty, response):
     entry = {
@@ -42,49 +44,35 @@ def log_exit_attempt(symbol, qty, response):
         with open(EXIT_ATTEMPTS_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
-        print(f"⚠️ Failed to log exit attempt: {e}")
+        logger.error({"event": "exit_log_fail", "error": str(e)})
 
 def log_reinforcement_profile(entry: dict):
-    path = "assistants/reinforcement_profile.jsonl"
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a") as f:
+        os.makedirs(os.path.dirname(REINFORCEMENT_PROFILE_PATH), exist_ok=True)
+        with open(REINFORCEMENT_PROFILE_PATH, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
-        print(f"⚠️ Failed to write reinforcement profile entry: {e}")
+        logger.error({"event": "reinforcement_log_fail", "error": str(e)})
 
 def get_open_positions():
-    raw = get_positions()
-    clean = [p for p in raw.get("positions", []) if isinstance(p, dict)]
-    if len(clean) < len(raw.get("positions", [])):
-        logger.warning({
-            "event": "filtered_invalid_positions",
-            "original_count": len(raw.get("positions", [])),
-            "valid_count": len(clean)
-        })
-    return {"positions": clean}
-
-def write_daily_alpha_log(pnl_percentage, trade_result):
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    log_path = os.path.join(LOGS_DIR, f"daily_alpha_log_{today}.json")
-    log_data = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "pnl": pnl_percentage,
-        "result": trade_result,
-    }
-    with open(log_path, "w") as f:
-        json.dump(log_data, f, indent=2)
+    try:
+        raw = get_positions().get("positions", [])
+        return {"positions": [p for p in raw if isinstance(p, dict)]}
+    except Exception as e:
+        logger.error({"event": "get_positions_fail", "error": str(e)})
+        return {"positions": []}
 
 def update_sync_log_with_outcome(option_symbol, outcome):
-    if not os.path.exists(SYNC_LOG_PATH):
-        return
-    with open(SYNC_LOG_PATH, "a") as f:
-        log_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "option_symbol": option_symbol,
-            "exit_result": outcome
-        }
-        f.write(json.dumps(log_entry) + "\n")
+    try:
+        with open(SYNC_LOG_PATH, "a") as f:
+            log_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "option_symbol": option_symbol,
+                "exit_result": outcome
+            }
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        logger.error({"event": "sync_log_fail", "error": str(e)})
 
 # --- Exit Evaluation with Mesh + GPT ---
 
@@ -101,37 +89,25 @@ def evaluate_exit(context, position):
 
     simulated_context = simulate_market_scenario(context)
     regime = simulated_context.get("regime", "unknown")
-    context["regime"] = regime
-    context["exit_signal"] = exit_signal
-    context["exit_confidence"] = exit_confidence
-    context["trade_id"] = position.get("trade_id")
+    context.update({
+        "regime": regime,
+        "exit_signal": exit_signal,
+        "exit_confidence": exit_confidence,
+        "trade_id": position.get("trade_id")
+    })
 
     async def decide():
         gpt_decision = await analyze_exit_with_gpt(context, context["trade_id"])
         gpt_signal = gpt_decision.get("signal", "hold")
         gpt_conf = gpt_decision.get("confidence", 0.5)
 
-        context["gpt_exit_signal"] = gpt_signal
-        context["gpt_confidence"] = gpt_conf
-        context["gpt_rationale"] = gpt_decision.get("rationale", "n/a")
-        context["reinforcement_label"] = f"gpt_exit:{gpt_signal}"
+        context.update({
+            "gpt_exit_signal": gpt_signal,
+            "gpt_confidence": gpt_conf,
+            "gpt_rationale": gpt_decision.get("rationale", "n/a"),
+            "reinforcement_label": f"gpt_exit:{gpt_signal}"
+        })
 
-        # Tag GPT output into open_trades.jsonl
-        try:
-            if os.path.exists(OPEN_TRADES_PATH):
-                with open(OPEN_TRADES_PATH, "r") as f:
-                    trades = [json.loads(line) for line in f if line.strip()]
-                with open(OPEN_TRADES_PATH, "w") as f:
-                    for trade in trades:
-                        if trade.get("trade_id") == context["trade_id"]:
-                            trade["gpt_exit_signal"] = gpt_signal
-                            trade["gpt_confidence"] = gpt_conf
-                            trade["gpt_rationale"] = context["gpt_rationale"]
-                        f.write(json.dumps(trade) + "\n")
-        except Exception as e:
-            print(f"⚠️ Failed to update GPT metadata in open_trades.jsonl: {e}")
-
-        # Final decision logic
         exit_thresh = get_exit_threshold()
         should_exit = (
             (exit_signal == "exit" and exit_confidence >= exit_thresh)
@@ -146,7 +122,14 @@ def evaluate_exit(context, position):
 
     return asyncio.run(decide())
 
-
+def confirm_order_success(order_id):
+    try:
+        result = get_order_status(order_id)
+        status = result.get("order", {}).get("status", "unknown")
+        return status == "ok"
+    except Exception as e:
+        logger.error({"event": "confirm_order_failed", "error": str(e)})
+        return False
 
 def exit_trade(position):
     symbol = position.get("symbol")
@@ -158,45 +141,43 @@ def exit_trade(position):
     log_exit_attempt(symbol, qty, response)
 
     if response and response.get("status") == "ok":
-        rationale = label_exit_reason(
-            pnl=position.get("pnl", 0),
-            decay=position.get("alpha_decay", 0),
-            mesh_signal="exit"
-        )
-        log_exit(position, reason="manual_or_triggered_exit")
-        update_sync_log_with_outcome(symbol, outcome="closed")
-        log_closed_trade(trade_id=trade_id, result="closed", context={"rationale": rationale})
-        trade_record = {
-            "symbol": symbol,
-            "pnl": position.get("pnl", 0.0),
-            "alpha_decay": position.get("alpha_decay", 0.0),
-            "exit_rationale": rationale,
-            "mesh_score": position.get("mesh_score", 0),
-            "quantity": qty,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        process_and_journal(trade_record)
-        process_trade_for_learning(trade_record)
-        log_reinforcement_profile(trade_record)
-        try:
-            evaluate_agents()
-            print("🧠 Mesh weights updated post-trade.")
-        except Exception as e:
-            print(f"⚠️ Mesh optimization failed: {e}")
+        order_id = response.get("order_id")
+        if confirm_order_success(order_id):
+            rationale = label_exit_reason(
+                pnl=position.get("pnl", 0),
+                decay=position.get("alpha_decay", 0),
+                mesh_signal="exit"
+            )
+            log_exit(position, reason=rationale)
+            update_sync_log_with_outcome(symbol, outcome="closed")
+            log_closed_trade(trade_id=trade_id, result="closed", context={"rationale": rationale})
+            process_and_journal({
+                "symbol": symbol,
+                "pnl": position.get("pnl", 0.0),
+                "alpha_decay": position.get("alpha_decay", 0.0),
+                "exit_rationale": rationale,
+                "mesh_score": position.get("mesh_score", 0),
+                "quantity": qty,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            process_trade_for_learning(position)
+            log_reinforcement_profile(position)
+            try:
+                evaluate_agents()
+                print("🧠 Mesh weights updated post-trade.")
+            except Exception as e:
+                print(f"⚠️ Mesh optimization failed: {e}")
             return True
-        logger.error({
-            "event": "exit_order_failed",
-            "symbol": symbol,
-            "qty": qty,
-            "response": response
-        })
-        print("🛑 Exit order failed or not confirmed by Tradier.")
-        return False
+        else:
+            print("⚠️ Exit order submitted but not confirmed by Tradier.")
+    else:
+        print("🛑 Exit order failed.")
 
+    logger.error({"event": "exit_order_failed", "symbol": symbol, "qty": qty, "response": response})
+    return False
 
 def manage_positions(vix_value=18.0):
     positions = get_open_positions()
-
     for position in positions.get("positions", []):
         if not isinstance(position, dict):
             logger.warning({"event": "invalid_position_object", "raw": str(position)})
@@ -260,48 +241,3 @@ def manage_positions(vix_value=18.0):
                 risk_profile="reduction",
                 meta={"alpha_decay": alpha_decay, "pnl": pnl}
             )
-            continue
-
-        # 🚀 Partial exit logic for scaling out of winners
-        qty = position.get("quantity", 1)
-        partial_exit_qty = 0
-        partial_reason = None
-
-        if pnl >= 1.0:
-            partial_exit_qty = qty
-            partial_reason = "Full exit at +100% PnL"
-        elif pnl >= 0.5:
-            partial_exit_qty = max(1, qty // 2)
-            partial_reason = "Partial exit at +50% PnL"
-
-        if partial_exit_qty > 0:
-            print(f"[PARTIAL EXIT] {option_symbol} | Qty: {partial_exit_qty} | Reason: {partial_reason}")
-            response = submit_order(
-                option_symbol=option_symbol,
-                quantity=partial_exit_qty,
-                action="sell_to_close"
-            )
-            log_exit_attempt(option_symbol, partial_exit_qty, response)
-            if response and response.get("status") == "ok":
-                log_exit(position, reason=partial_reason)
-                update_sync_log_with_outcome(option_symbol, outcome="partial_exit")
-                log_allocation_update(
-                    recommended=0.10,
-                    rationale="partial_exit_scale_out",
-                    qthink_label="exit:profit_scaleout",
-                    regime=context.get("regime", "unknown"),
-                    risk_profile="reduction",
-                    meta={"alpha_decay": alpha_decay, "pnl": pnl}
-                )
-                print(f"✅ Partial exit completed: {option_symbol} x {partial_exit_qty}")
-                continue
-            else:
-                logger.error({
-                    "event": "partial_exit_failed",
-                    "symbol": option_symbol,
-                    "qty": partial_exit_qty,
-                    "response": response
-                })
-                print("⚠️ Partial exit order failed")
-
-        print(f"[HOLD] Retaining position: {option_symbol}")

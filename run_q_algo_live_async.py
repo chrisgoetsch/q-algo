@@ -1,7 +1,6 @@
 # File: run_q_algo_live_async.py
 
 import asyncio
-import os
 import json
 from datetime import datetime
 from dotenv import load_dotenv
@@ -43,11 +42,11 @@ async def main_loop():
 
     # Initial sync before loop
     fetch_tradier_equity()
-    sync_open_trades_with_tradier()  # overwrite with live positions
-    run_recovery()  # apply local metadata if needed
+    sync_open_trades_with_tradier()
+    run_recovery()
 
-    # Start WebSocket in background
-    asyncio.create_task(start_polygon_listener(["SPY"]))
+    # Start real-time Polygon WebSocket (SPY trades + quotes)
+    asyncio.create_task(start_polygon_listener(["Q.SPY", "T.SPY"]))
 
     equity_baseline = 0
 
@@ -63,7 +62,7 @@ async def main_loop():
                 save_equity_baseline(equity_baseline)
 
             if status.get("kill_switch", False):
-                print("[Q Algo] Kill switch is active. Pausing...")
+                print("[Q Algo] 🚨 Kill switch is active. Pausing...")
                 update_runtime_state({"mode": "paused", "mesh_health": "halted"})
                 await async_sleep(60)
                 continue
@@ -74,9 +73,9 @@ async def main_loop():
                 await async_sleep(60)
                 continue
 
-            entry_score = await asyncio.to_thread(evaluate_entry, symbol)
+            entry_score = await evaluate_entry(symbol)
             if entry_score:
-                print("[Q Algo] Entry condition met. Opening position.")
+                print("[Q Algo] ✅ Entry condition met. Opening position.")
                 base_alloc = get_current_allocation()
                 equity_now = account.get("equity", 0)
                 throttle = evaluate_drawdown_throttle(equity_now, equity_baseline)
@@ -85,14 +84,20 @@ async def main_loop():
                 adjusted_alloc = compute_position_size(
                     adjusted_alloc, 1.0, 0.9, max_position_fraction=0.5
                 )
-                print(f"[Capital Manager] Final capital allocation: {adjusted_alloc * 100:.1f}%")
-
                 contracts = max(1, int(adjusted_alloc * 10))
                 trade_id = f"{symbol}_{datetime.utcnow().isoformat()}"
 
+                print(f"[Q Algo] 🟢 Placing order: {symbol} × {contracts} contracts")
+
                 await asyncio.to_thread(open_position, symbol, contracts, "C")
-                log_open_trade(trade_id, agent="qthink", direction="long", strike=0, expiry="0DTE",
-                               meta={"allocation": adjusted_alloc, "contracts": contracts})
+                log_open_trade(
+                    trade_id,
+                    agent="qthink",
+                    direction="long",
+                    strike=0,
+                    expiry="0DTE",
+                    meta={"allocation": adjusted_alloc, "contracts": contracts}
+                )
                 update_runtime_state({
                     "mode": "live",
                     "active_agents": ["qthink", "run_q_algo_live_async"],
@@ -101,10 +106,13 @@ async def main_loop():
                 })
 
             await asyncio.to_thread(manage_positions)
-            update_runtime_state({"last_exit": datetime.utcnow().isoformat(), "mesh_health": "stable"})
+            update_runtime_state({
+                "last_exit": datetime.utcnow().isoformat(),
+                "mesh_health": "stable"
+            })
 
         except Exception as e:
-            print(f"[Q Algo Async] Exception:", str(e))
+            print(f"[Q Algo Async] ❌ Exception: {e}")
             update_runtime_state({
                 "mesh_health": "exception",
                 "error": f"{type(e).__name__}: {str(e)}"

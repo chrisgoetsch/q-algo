@@ -1,5 +1,3 @@
-# File: core/trade_engine.py
-
 import os
 from datetime import datetime
 from core.entry_learner import score_entry, build_entry_features
@@ -14,11 +12,14 @@ from core.threshold_manager import get_entry_threshold
 
 SYMBOL = "SPY"
 
-
-def open_position(symbol: str, quantity: int, call_put: str):
+def open_position(symbol: str, quantity: int, call_put: str = "C"):
     """
-    Run entry pipeline, calculate confidence, size trade based on capital allocation,
-    and submit live order.
+    Executes the full trade entry pipeline:
+    1. Generate mesh signal
+    2. Score entry
+    3. Check capital and thresholds
+    4. Submit order to Tradier
+    5. Log to trade tracker
     """
     context = {
         "symbol": symbol,
@@ -27,14 +28,11 @@ def open_position(symbol: str, quantity: int, call_put: str):
         "call_put": call_put
     }
 
-    # Mesh signals include score, triggered agents, agent scores, and signal_ids
     mesh_output = get_mesh_signal(context)
     context.update(mesh_output)
 
-    # Inject primary signal_id (you can choose a strategy; here we take the top agent if any)
     top_agents = mesh_output.get("trigger_agents", [])
     signal_ids = mesh_output.get("signal_ids", {})
-
     if top_agents:
         context["signal_id"] = signal_ids.get(top_agents[0])
 
@@ -43,28 +41,56 @@ def open_position(symbol: str, quantity: int, call_put: str):
     allocation = get_current_allocation()
 
     print(f"[ENTRY] Score: {score:.2f} | Alloc: {allocation:.2f} | Rationale: {rationale}")
+    context.update({
+        "score": score,
+        "rationale": rationale,
+        "allocation": allocation,
+    })
 
-    if score >= get_entry_threshold():
-        qty = quantity
+    if score < get_entry_threshold():
+        print("⚠️ Entry score below threshold — skipping trade.")
+        logger.info({
+            "event": "entry_skipped_low_score",
+            "score": score,
+            "threshold": get_entry_threshold(),
+            "context": context
+        })
+        return
 
-        # Get Tradier-compliant ATM option symbol
-        option_symbol = get_atm_option_symbol(symbol=symbol, call_put=call_put)
-        context["option_symbol"] = option_symbol
+    option_symbol = get_atm_option_symbol(symbol=symbol, call_put=call_put)
+    if not option_symbol:
+        logger.warning({
+            "event": "missing_option_symbol",
+            "context": context
+        })
+        print("⚠️ No valid option symbol returned from get_atm_option_symbol().")
+        return
 
-        if not option_symbol:
-            logger.warning({"event": "missing_option_symbol", "context": context})
-            print("⚠️ No valid option symbol returned from get_atm_option_symbol().")
-            return
+    context["option_symbol"] = option_symbol
+    action = "buy_to_open"
 
-        print(f"[ORDER] Submitting {qty} × {option_symbol}")
-        order = submit_order(option_symbol=option_symbol, quantity=qty, action="buy_to_open")
+    print(f"[Q Algo] 🟢 Attempting to place order: {option_symbol} × {quantity} ({action})")
 
-        if order:
-            print(f"✅ Order confirmed: {order}")
-            context["capital_allocated"] = allocation
-            track_open_trade(option_symbol, context)
-        else:
-            print("🛑 Order failed")
+    order = submit_order(
+        option_symbol=option_symbol,
+        quantity=quantity,
+        action=action,
+        estimated_cost_per_contract=1.00  # optionally dynamic later
+    )
+
+    if order.get("status") == "ok":
+        print(f"✅ Order confirmed: {order}")
+        context["capital_allocated"] = allocation
+        context["order_id"] = order.get("order_id")
+        track_open_trade(context)
+    else:
+        print(f"🛑 Order not confirmed: {order}")
+        logger.warning({
+            "event": "order_not_confirmed",
+            "reason": order.get("reason"),
+            "details": order,
+            "context": context
+        })
 
 
 if __name__ == "__main__":

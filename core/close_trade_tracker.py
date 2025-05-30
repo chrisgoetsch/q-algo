@@ -12,7 +12,6 @@ REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants
 LABEL_KEYWORDS = ["profit", "target", "strong", "alignment"]
 NEGATIVE_KEYWORDS = ["bad entry", "mesh conflict", "regret"]
 
-
 def log_closed_trade(trade_id, result, context):
     """
     Save the result of a closed trade, and remove it from open_trades.jsonl.
@@ -34,7 +33,6 @@ def log_closed_trade(trade_id, result, context):
         update_reinforcement_profile(context.get("rationale", ""))
     except Exception as e:
         print(f"❌ Failed to log closed trade: {e}")
-
 
 def update_reinforcement_profile(label_text):
     """

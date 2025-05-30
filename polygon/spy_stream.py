@@ -7,7 +7,7 @@ import websockets
 from datetime import datetime
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
-WS_URL = "wss://socket.polygon.io/stocks"
+WS_URL = "wss://socket.polygon.io/options"
 SPY_SYMBOL = "T.SPY"
 
 LOG_PATH = "logs/spy_stream.jsonl"

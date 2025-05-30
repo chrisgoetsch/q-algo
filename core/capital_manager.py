@@ -1,4 +1,4 @@
-# File: core/capital_manager.py
+# ✅ Updated: core/capital_manager.py with forced override logic and single-entry enforcement
 
 import os
 import json
@@ -7,11 +7,11 @@ from datetime import datetime
 from polygon.polygon_rest import get_option_metrics
 from analytics.model_audit import analyze_by_model, load_trades
 
+OPEN_TRADES_PATH = os.getenv("OPEN_TRADES_PATH", "logs/open_trades.jsonl")
 CAPITAL_TRACKER_PATH = os.getenv("CAPITAL_TRACKER_PATH", "logs/capital_tracker.json")
 EQUITY_BASELINE_PATH = os.getenv("EQUITY_BASELINE_PATH", "logs/equity_baseline.json")
-
 MODEL_VERSION = "entry-model-v1.0"
-
+FORCED_ALLOCATION_OVERRIDE = float(os.getenv("FORCED_ALLOCATION_OVERRIDE", 0))
 
 def get_latest_win_rate(version=MODEL_VERSION) -> float:
     try:
@@ -21,7 +21,6 @@ def get_latest_win_rate(version=MODEL_VERSION) -> float:
     except Exception as e:
         print(f"⚠️ Failed to fetch model win rate: {e}")
         return 0.5
-
 
 def parse_account_balances(data):
     balances = data.get("balances", {})
@@ -44,8 +43,11 @@ def parse_account_balances(data):
     buying_power = float(balances.get("margin", {}).get("option_buying_power", 0.0))
     return buying_power, equity
 
-
 def get_current_allocation(default: float = 0.2) -> float:
+    if FORCED_ALLOCATION_OVERRIDE > 0:
+        print(f"🔒 Using FORCED override: {FORCED_ALLOCATION_OVERRIDE:.2f}")
+        return FORCED_ALLOCATION_OVERRIDE
+
     model_win_rate = get_latest_win_rate()
     if model_win_rate < 0.4:
         print("⚠️ Model underperforming. Reducing allocation.")
@@ -68,7 +70,6 @@ def get_current_allocation(default: float = 0.2) -> float:
         print(f"⚠️ Failed to read capital allocation: {e}")
         return default
 
-
 def log_allocation_update(recommended: float,
                           rationale: str = "ml_adjusted",
                           qthink_label: str = None,
@@ -90,12 +91,11 @@ def log_allocation_update(recommended: float,
     }
     try:
         os.makedirs(os.path.dirname(CAPITAL_TRACKER_PATH), exist_ok=True)
-        with open(CAPITAL_TRACKER_PATH, "a") as f:
+        with open(CAPITAL_TRACKER_PATH, "w") as f:
             f.write(json.dumps(entry) + "\n")
         print(f"💰 Capital allocation updated: {recommended:.2f} ({regime}, {rationale})")
     except Exception as e:
         print(f"❌ Failed to log capital update: {e}")
-
 
 def adjust_allocation_from_signal(win_rate: float, volatility_score: float, drawdown: float,
                                    mesh_density: float, confidence_score: float = 0.5, regret_risk: float = 0.5) -> float:
@@ -114,7 +114,6 @@ def adjust_allocation_from_signal(win_rate: float, volatility_score: float, draw
         base -= 0.05
     return max(0.05, min(round(base, 3), 1.0))
 
-
 def compute_position_size(base_allocation: float, mesh_agent_score: float,
                            gpt_confidence: float, max_position_fraction: float = 0.3) -> float:
     tier_boost = 0
@@ -126,7 +125,6 @@ def compute_position_size(base_allocation: float, mesh_agent_score: float,
         tier_boost -= 0.05
     adjusted = base_allocation + tier_boost
     return max(0.05, min(round(adjusted, 3), max_position_fraction))
-
 
 def evaluate_drawdown_throttle(equity_now: float, equity_start: float) -> float:
     if equity_start == 0:
@@ -140,7 +138,6 @@ def evaluate_drawdown_throttle(equity_now: float, equity_start: float) -> float:
         return 0.5
     return 1.0
 
-
 def load_equity_baseline() -> float:
     if os.path.exists(EQUITY_BASELINE_PATH):
         try:
@@ -150,7 +147,6 @@ def load_equity_baseline() -> float:
             print(f"⚠️ Failed to load equity baseline: {e}")
     return 0.0
 
-
 def save_equity_baseline(value: float):
     try:
         os.makedirs(os.path.dirname(EQUITY_BASELINE_PATH), exist_ok=True)
@@ -158,7 +154,6 @@ def save_equity_baseline(value: float):
             json.dump({"equity_baseline": value}, f)
     except Exception as e:
         print(f"❌ Failed to save equity baseline: {e}")
-
 
 def get_tradier_buying_power(verbose=False) -> tuple[float, float]:
     TRADIER_API_BASE = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
@@ -182,8 +177,7 @@ def get_tradier_buying_power(verbose=False) -> tuple[float, float]:
         return buying_power, equity
     except Exception as e:
         print(f"⚠️ Failed to retrieve Tradier balance info: {e}")
-        return 0.0
-
+        return 0.0, 0.0
 
 def scale_allocation_by_volatility(symbol: str, target_iv: float = 0.3) -> float:
     option_data = get_option_metrics(symbol)
