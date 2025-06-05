@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { MeshAgentCard } from './MeshAgentCard'
+import { MeshAgentCard } from '../frontend/src/components/ui/MeshAgentCard'
 
 type AgentLog = {
   timestamp: string

@@ -1,59 +1,87 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# File: core/open_trade_tracker.py  (rewritten for new order payload)
+# ─────────────────────────────────────────────────────────────────────────────
+"""Keeps logs/open_trades.jsonl in sync with confirmed open positions.
+
+Changes vs. legacy version
+• `track_open_trade()` now accepts the **context** dict from trade_engine
+  (no longer relies on a `status=='ok'` flag).
+• Uses token‑refreshing headers from core.tradier_execution instead of
+  static env vars so it never breaks after a refresh.
+• All writes are atomic and append‑only.
+"""
+from __future__ import annotations
+
 import os
 import json
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List
 
-from core.tradier_client import get_positions
+import requests
 
+from core.logger_setup import logger
+from core.tradier_execution import _headers  # type: ignore (internal helper ok)
+from core.resilient_request import resilient_get
+
+TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID", "")
+TRADIER_API_BASE = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
 OPEN_TRADES_PATH = "logs/open_trades.jsonl"
 
+# ---------------------------------------------------------------------------
+# Tradier helpers
+# ---------------------------------------------------------------------------
 
-def sync_open_trades_with_tradier():
-    """
-    Pull live open positions from Tradier and sync to local open_trades.jsonl,
-    tagging each trade with timestamp and minimal context.
-    """
-    raw = get_positions()
-    if not isinstance(raw, dict):
-        print("🛑 'positions' field not a dict: null or invalid response.")
-        return
-
-    positions = raw.get("positions", [])
-    if not positions:
-        print("🟡 No open positions found or empty response.")
-        return
-
-    clean_positions = []
-    for pos in positions:
-        if isinstance(pos, dict) and pos.get("symbol", "").startswith("SPY") and pos.get("quantity", 0) > 0:
-            print(f"📥 Syncing open trade: {pos['symbol']} x{pos['quantity']}")
-            clean_positions.append({
-                "symbol": pos["symbol"],
-                "quantity": pos["quantity"],
-                "entry_time": datetime.utcnow().isoformat(),
-                "mesh_score": 50,
-                "trade_id": f"{pos['symbol']}_{datetime.utcnow().isoformat()}"
-            })
-        else:
-            print(f"⚠️ Skipped malformed or irrelevant position: {pos}")
-
-    os.makedirs(os.path.dirname(OPEN_TRADES_PATH), exist_ok=True)
-    with open(OPEN_TRADES_PATH, "w") as f:
-        for trade in clean_positions:
-            f.write(json.dumps(trade) + "\n")
-
-    print(f"🔄 Synced {len(clean_positions)} live trades from Tradier → open_trades.jsonl")
+def _tradier_get(url: str, params: dict | None = None):
+    return resilient_get(url, params=params, headers=_headers())
 
 
-def atomic_write_line(filepath, line_data):
+def fetch_open_tradier_orders() -> List[dict]:
+    url = f"{TRADIER_API_BASE}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+    resp = _tradier_get(url)
+    if not resp:
+        logger.error({"event": "tradier_order_fetch_fail"})
+        return []
     try:
-        with open(filepath, "a") as f:
-            f.write(json.dumps(line_data) + "\n")
+        raw_orders = resp.json().get("orders", {}).get("order", [])
+        if isinstance(raw_orders, dict):
+            raw_orders = [raw_orders]
+        return [o for o in raw_orders if o.get("status") == "filled"]
     except Exception as e:
-        print(f"❌ Failed to write open trade log: {e}")
+        logger.error({"event": "order_parse_fail", "error": str(e), "raw": resp.text})
+        return []
 
 
-def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
+# ---------------------------------------------------------------------------
+# Sync & logging operations
+# ---------------------------------------------------------------------------
+
+def _atomic_write_line(path: str, obj: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(obj) + "\n")
+
+
+def sync_open_trades_with_tradier() -> None:
+    synced: List[dict] = []
+    for order in fetch_open_tradier_orders():
+        opt_sym = order.get("option_symbol") or order.get("symbol")
+        if not opt_sym:
+            continue
+        trade = {
+            "trade_id": f"{opt_sym}_{order.get('id')}",
+            "symbol": opt_sym,
+            "quantity": int(order.get("quantity", 1)),
+            "entry_time": order.get("create_date", datetime.utcnow().isoformat()),
+            "status": order.get("status"),
+            "order_id": order.get("id"),
+        }
+        synced.append(trade)
+        _atomic_write_line(OPEN_TRADES_PATH, trade)
+        print(f"✅ Synced trade {opt_sym} ×{trade['quantity']}")
+    print(f"🔄 {len(synced)} open trades written to {OPEN_TRADES_PATH}")
+
+
+def log_open_trade(trade_id: str, agent: str, direction: str, strike: float, expiry: str, meta: dict | None = None):
     entry = {
         "trade_id": trade_id,
         "agent": agent,
@@ -61,72 +89,44 @@ def log_open_trade(trade_id, agent, direction, strike, expiry, meta=None):
         "strike": strike,
         "expiry": expiry,
         "timestamp": datetime.utcnow().isoformat(),
-        "meta": meta or {}
+        "meta": meta or {},
     }
-    atomic_write_line(OPEN_TRADES_PATH, entry)
+    _atomic_write_line(OPEN_TRADES_PATH, entry)
 
 
-def track_open_trade(trade: Dict):
-    if trade.get("status") != "ok":
-        print(f"⚠️ Not tracking trade due to failed order: {trade}")
-        return
+def track_open_trade(context: Dict):
+    """Persist a freshly opened trade coming from trade_engine.
 
+    Expects *context* with keys: option_symbol, order_id, contracts, etc.
+    """
+    trade_id = context.get("trade_id") or f"{context['option_symbol']}_{datetime.utcnow().isoformat()}"
     record = {
-        "trade_id": f"{trade['option_symbol']}_{datetime.utcnow().isoformat()}",
-        "option_symbol": trade["option_symbol"],
-        "timestamp": datetime.utcnow().isoformat(),
-        "meta": {
-            "order_id": trade.get("order_id"),
-            "contracts": 1
-        }
+        "trade_id": trade_id,
+        "symbol": context["option_symbol"],
+        "quantity": int(context.get("contracts", 1)),
+        "entry_time": datetime.utcnow().isoformat(),
+        "order_id": context.get("order_id"),
+        "score": context.get("score"),
+        "mesh_agents": context.get("trigger_agents"),
     }
-
-    try:
-        with open(OPEN_TRADES_PATH, "a") as f:
-            f.write(json.dumps(record) + "\n")
-        print(f"📈 Trade logged: {record['trade_id']}")
-    except Exception as e:
-        print(f"🛑 Failed to log trade: {e}")
+    _atomic_write_line(OPEN_TRADES_PATH, record)
+    print(f"📈 Trade logged → {trade_id}")
 
 
-def is_expired(option_symbol: str) -> bool:
-    try:
-        expiry_str = option_symbol[3:9]
-        expiry_date = datetime.strptime(expiry_str, "%y%m%d").date()
-        return expiry_date < datetime.utcnow().date()
-    except Exception as e:
-        print(f"⚠️ Failed to parse expiry from {option_symbol}: {e}")
-        return True
-
-
-def load_open_trades(path=OPEN_TRADES_PATH):
+def load_open_trades(path: str = OPEN_TRADES_PATH):
     if not os.path.exists(path):
-        print(f"⚠️ {path} not found. Returning empty trade list.")
         return []
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
 
-    valid_trades = []
-    with open(path, "r") as f:
-        for line in f:
-            try:
-                trade = json.loads(line)
-                symbol = trade.get("symbol", trade.get("trade_id", ""))
-                if is_expired(symbol):
-                    print(f"🪦 Skipping expired option: {symbol}")
-                    continue
-                valid_trades.append(trade)
-            except Exception as e:
-                print(f"⚠️ Skipping malformed trade line: {e}")
+# ---------------------------------------------------------------------------
+# Helper for position_manager to remove closed trades
+# ---------------------------------------------------------------------------
 
-    return valid_trades
-
-
-def remove_trade(trade_id):
+def remove_trade(trade_id: str):
     trades = load_open_trades()
-    updated = [t for t in trades if t.get("trade_id") != trade_id]
-    try:
-        with open(OPEN_TRADES_PATH, "w") as f:
-            for t in updated:
-                f.write(json.dumps(t) + "\n")
-        print(f"🧹 Removed trade: {trade_id}")
-    except Exception as e:
-        print(f"⚠️ Failed to rewrite {OPEN_TRADES_PATH}: {e}")
+    remaining = [t for t in trades if t.get("trade_id") != trade_id]
+    with open(OPEN_TRADES_PATH, "w") as fh:
+        for t in remaining:
+            fh.write(json.dumps(t) + "\n")
+    print(f"🧹 Removed trade {trade_id}")

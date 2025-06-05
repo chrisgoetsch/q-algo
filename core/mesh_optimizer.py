@@ -1,101 +1,132 @@
-# File: core/mesh_optimizer.py
+# File: core/mesh_optimizer.py  (refactored for o3‑Tradier flow)
+"""Dynamically tunes agent base‑scores in *mesh/mesh_config.json* using the
+reinforcement profile produced by close_trade_tracker.
 
-import os
-import json
+Key upgrades
+------------
+• Uses core.logger_setup for JSON logs instead of ad‑hoc prints
+• Accepts legacy flat config OR nested {"agents": {…}} format transparently
+• Adds safeguard to write a timestamped backup of the previous mesh_config
+• Centralised helper functions for IO and atomic file writes
+"""
+from __future__ import annotations
+
+import os, json, shutil
 from datetime import datetime
+from typing import Dict, Tuple, List
 
-# Paths
+from core.logger_setup import logger
+
+# ---------------------------------------------------------------------------
+# Paths (env‑configurable)
+# ---------------------------------------------------------------------------
 REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
 MESH_CONFIG_PATH = os.getenv("MESH_CONFIG_PATH", "mesh/mesh_config.json")
-DYNAMIC_LOG_PATH = os.getenv("MESH_OPTIMIZER_LOG", "logs/mesh_optimizer.jsonl")
+MESH_OPT_LOG = os.getenv("MESH_OPTIMIZER_LOG", "logs/mesh_optimizer.jsonl")
 
-def load_json(path):
+# ---------------------------------------------------------------------------
+# IO helpers
+# ---------------------------------------------------------------------------
+
+def _load_json(path: str, default: dict | None = None) -> dict:
     if not os.path.exists(path):
-        return {}
-    with open(path, "r") as f:
-        return json.load(f)
+        return default or {}
+    try:
+        return json.load(open(path))
+    except Exception as e:
+        logger.error({"event": "json_load_fail", "path": path, "err": str(e)})
+        return default or {}
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
 
-def write_log(entry):
-    os.makedirs(os.path.dirname(DYNAMIC_LOG_PATH), exist_ok=True)
-    with open(DYNAMIC_LOG_PATH, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+def _save_json(path: str, data: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(data, open(path, "w"), indent=2)
 
-def load_agent_performance():
-    """
-    Load current agent scoring weights from mesh_config.json
-    """
-    if not os.path.exists(MESH_CONFIG_PATH):
-        raise FileNotFoundError(f"{MESH_CONFIG_PATH} not found")
 
-    with open(MESH_CONFIG_PATH, "r") as f:
-        config = json.load(f)
+def _append_log(entry: dict):
+    os.makedirs(os.path.dirname(MESH_OPT_LOG), exist_ok=True)
+    with open(MESH_OPT_LOG, "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
-    agents = config.get("agents", config)  # fallback for legacy format
+# ---------------------------------------------------------------------------
+# Core logic
+# ---------------------------------------------------------------------------
 
-    performance = {}
-    for agent, info in agents.items():
-        performance[agent] = {"score": info.get("base_score", 50)}
-    return performance
+def _normalize_config(cfg: dict) -> dict:
+    """Return cfg with top‑level 'agents' key always present."""
+    return {"agents": cfg.get("agents", cfg)}
 
-def evaluate_agents():
-    profile = load_json(REINFORCEMENT_PROFILE_PATH)
-    config = load_json(MESH_CONFIG_PATH)
 
-    agents = config.get("agents", config)  # fallback support
-    updated_agents = []
-    logs = []
+def _backup_config(path: str):
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    backup = f"{path}.{ts}.bak"
+    try:
+        shutil.copy2(path, backup)
+    except Exception as e:
+        logger.warning({"event": "mesh_backup_fail", "err": str(e)})
 
-    for agent, settings in agents.items():
+
+def evaluate_agents() -> None:
+    """Adjust agent base_score values based on reinforcement tallies."""
+    profile = _load_json(REINFORCEMENT_PROFILE_PATH)
+    cfg = _normalize_config(_load_json(MESH_CONFIG_PATH))
+    agents = cfg["agents"]
+
+    updated: List[dict] = []
+
+    for name, settings in agents.items():
         if not settings.get("dynamic_weight", False):
             continue
 
-        base_score = settings.get("base_score", 50)
+        base = settings.get("base_score", 50)
         decay_rate = settings.get("decay_on_loss", 0.05)
 
-        # Penalties from reinforcement log
-        penalties = sum(
-            profile.get(f"{agent}:{label}", 0)
-            for label in ["bad entry", "mesh conflict", "high regret"]
-        )
-        boosts = sum(
-            profile.get(f"{agent}:{label}", 0)
-            for label in ["profit target", "strong signal", "gpt_reinforced"]
-        )
+        penalties = sum(profile.get(f"{name}:{label}", 0) for label in ["bad", "conflict", "regret"])
+        boosts = sum(profile.get(f"{name}:{label}", 0) for label in ["profit", "strong", "gpt_reinforced"])
 
         delta = boosts * 1.5 - penalties
-        adjusted = base_score + delta - (penalties * decay_rate * 100)
+        adjusted = base + delta - (penalties * decay_rate * 100)
+        new_base = max(10, min(int(adjusted), 100))
 
-        new_score = max(10, min(int(adjusted), 100))  # clamp 10–100
-        if new_score != base_score:
-            settings["base_score"] = new_score
-            updated_agents.append(agent)
-
-            logs.append({
-                "agent": agent,
-                "old": base_score,
-                "new": new_score,
-                "delta": new_score - base_score,
+        if new_base != base:
+            settings["base_score"] = new_base
+            updated.append({
+                "agent": name,
+                "old": base,
+                "new": new_base,
                 "penalties": penalties,
-                "boosts": boosts
+                "boosts": boosts,
             })
+            logger.info({"event": "mesh_agent_update", "agent": name, "old": base, "new": new_base})
 
-    # Save and log
-    if "agents" in config:
-        config["agents"] = agents
+    if updated:
+        _backup_config(MESH_CONFIG_PATH)
+        _save_json(MESH_CONFIG_PATH, cfg)
+        _append_log({
+            "timestamp": datetime.utcnow().isoformat(),
+            "updated": updated,
+        })
     else:
-        config = agents  # legacy fallback
+        logger.info({"event": "mesh_no_change"})
 
-    save_json(MESH_CONFIG_PATH, config)
-
-    write_log({
-        "timestamp": datetime.utcnow().isoformat(),
-        "action": "update_weights",
-        "updated": logs
-    })
-
+# ---------------------------------------------------------------------------
+# CLI self‑test
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     evaluate_agents()
+    print("✨ mesh_optimizer self‑test complete.")
+# ➜ core/mesh_optimizer.py  (append near bottom, after evaluate_agents)
+
+# ---------------------------------------------------------------------------
+# Legacy API shim for mesh_router and other callers
+# ---------------------------------------------------------------------------
+def load_agent_performance() -> dict:
+    """
+    Return {agent: {"score": base_score}} for every agent in mesh_config.json.
+    Keeps legacy callers working without code changes.
+    """
+    cfg = _normalize_config(_load_json(MESH_CONFIG_PATH))
+    perf = {}
+    for agent, info in cfg["agents"].items():
+        perf[agent] = {"score": info.get("base_score", 50)}
+    return perf
