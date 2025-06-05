@@ -1,5 +1,12 @@
 {
-  "latest_vix": 19.2,
-  "historical_levels": [16.3, 18.0, 19.2, 21.5, 22.0],
-  "last_updated": "2024-04-12T14:30:00Z"
+  "latest_vix": 24.3,
+  "prev_1h_vix": 22.0,
+  "prev_1d_vix": 20.7,
+  "latest_vvix": 112.5,
+  "prev_1h_vvix": 99.1,
+  "spy_price": 435.80,
+  "prev_spy": 438.20,
+  "as_of": "2025-05-26T14:45:00Z",
+  "source": "polygon.io + qthink macro monitor",
+  "notes": "auto-updated hourly from macro watcher"
 }

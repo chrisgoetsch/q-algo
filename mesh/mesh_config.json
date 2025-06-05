@@ -1,22 +1,65 @@
 {
-  "q_block": {
-    "score": 85,
-    "enabled": true
-  },
-  "q_trap": {
-    "score": 70,
-    "enabled": true
-  },
-  "q_quant": {
-    "score": 60,
-    "enabled": true
-  },
-  "q_precision": {
-    "score": 90,
-    "enabled": true
-  },
-  "q_scout": {
-    "score": 75,
-    "enabled": true
+  "mode": "0DTE",
+  "default_weight_strategy": "adaptive",
+  "agents": {
+    "q_block": {
+      "enabled": true,
+      "base_score": 85,
+      "dynamic_weight": true,
+      "role": "override",
+      "decay_on_loss": 0.1,
+      "conditions": {
+        "vix_max": 25,
+        "regimes_excluded": ["panic", "compressing"]
+      }
+    },
+    "q_trap": {
+      "enabled": true,
+      "base_score": 70,
+      "dynamic_weight": false,
+      "role": "entry_filter",
+      "conditions": {
+        "market_hours_only": true,
+        "macro_blacklist": ["fomc", "cpi"]
+      }
+    },
+    "q_quant": {
+      "enabled": true,
+      "base_score": 60,
+      "dynamic_weight": true,
+      "role": "core_entry",
+      "conditions": {
+        "min_volume": 100000,
+        "macro_whitelist": ["quadwitch", "opex"]
+      }
+    },
+    "q_precision": {
+      "enabled": true,
+      "base_score": 90,
+      "dynamic_weight": true,
+      "role": "core_entry",
+      "conditions": {
+        "regimes_only": ["bullish", "stable", "trending"],
+        "max_drawdown_pct": 10
+      }
+    },
+    "q_scout": {
+      "enabled": false,
+      "base_score": 75,
+      "dynamic_weight": false,
+      "role": "experimental",
+      "conditions": {}
+    },
+    "q_0dte_brain": {
+      "enabled": true,
+      "base_score": 80,
+      "dynamic_weight": true,
+      "role": "pattern_gpt",
+      "decay_on_loss": 0.05,
+      "conditions": {
+        "regimes_only": ["bullish", "trending", "choppy"],
+        "exclude_if_vix_above": 28
   }
+}
+}
 }

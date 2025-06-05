@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-KILL_SWITCH_PATH = "backend/status.json"
+KILL_SWITCH_PATH = "logs/status.json"
 
 def read_kill_status():
     if not os.path.exists(KILL_SWITCH_PATH):

@@ -1,4 +1,4 @@
-# File: analytics/qthink_log_labeler.py
+# ✅ Patched: analytics/qthink_log_labeler.py with exportable log_score_breakdown_async
 
 import sys
 import os
@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Dict
 from core.env_validator import validate_env
 from core.resilient_request import resilient_post
+import asyncio
+import numpy as np
 
 # Adjust path for standalone debugging
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,6 +25,7 @@ validate_env()
 QTHINK_LOG_PATH = os.getenv("QTHINK_LOG_PATH", "logs/qthink_labels.jsonl")
 REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
 INSIGHTS_LOG_PATH = os.getenv("INSIGHTS_LOG_PATH", "logs/qthink_insights.jsonl")
+SCORE_LOG_PATH = os.getenv("SCORE_LOG_PATH", "logs/qthink_score_breakdown.jsonl")
 OPENAI_COMPLETION_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4")
@@ -31,6 +34,7 @@ GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4")
 os.makedirs(os.path.dirname(QTHINK_LOG_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(REINFORCEMENT_PROFILE_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(INSIGHTS_LOG_PATH), exist_ok=True)
+os.makedirs(os.path.dirname(SCORE_LOG_PATH), exist_ok=True)
 
 def label_exit_reason(pnl: float, decay: float, mesh_signal: str) -> str:
     reasons = []
@@ -109,7 +113,6 @@ def process_and_journal(trade: Dict):
     write_jsonl(INSIGHTS_LOG_PATH, labeled)
 
     profile = load_reinforcement_profile()
-
     labels = [l.strip() for l in (labeled["label"] or "").split("|") if l.strip()]
     if not labels:
         labels = ["unlabeled"]
@@ -120,13 +123,19 @@ def process_and_journal(trade: Dict):
     save_reinforcement_profile(profile)
     logger.info({"event": "trade_processed", "labels": labels, "timestamp": labeled["labeled_at"]})
 
-if __name__ == "__main__":
-    sample_trade = {
-        "symbol": "SPY",
-        "entry_price": 420.5,
-        "exit_price": 422.0,
-        "quantity": 1,
-        "pnl": 1.5,
-        "reason": "profit_target"
+async def log_score_breakdown_async(log_data):
+    log_data["timestamp"] = datetime.utcnow().isoformat()
+    log_data["model_version"] = os.getenv("MODEL_VERSION", "entry-model-v1.0")
+    log_data = {
+        k: float(v) if isinstance(v, (np.float32, np.float64)) else v
+        for k, v in log_data.items()
     }
-    process_and_journal(sample_trade)
+    try:
+        await asyncio.to_thread(_write_score_log, log_data)
+    except Exception as e:
+        print(f"⚠️ Failed to log score breakdown: {e}")
+
+def _write_score_log(log_data):
+    os.makedirs(os.path.dirname(SCORE_LOG_PATH), exist_ok=True)
+    with open(SCORE_LOG_PATH, "a") as f:
+        f.write(json.dumps(log_data) + "\n")

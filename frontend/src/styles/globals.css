@@ -1,0 +1,15 @@
+/* globals.css - Tailwind v4+ compatible */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-white text-black;
+  }
+
+  html.dark {
+    @apply bg-gray-900 text-gray-100;
+  }
+}

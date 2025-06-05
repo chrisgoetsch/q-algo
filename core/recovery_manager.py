@@ -24,10 +24,7 @@ def load_open_trades():
 
 def resume_trade_monitoring(trade):
     print(f"🔁 Resuming monitoring for: {trade['trade_id']}")
-    # You can hook into position_manager here
-    # For example, you could pass to manage_positions(trade)
-    # But in most cases, manage_positions() already checks all active trades
-    # This function is a placeholder to integrate deeper control later
+    # Hook into position manager or a direct trade monitor here in the future
     pass
 
 def run_recovery():

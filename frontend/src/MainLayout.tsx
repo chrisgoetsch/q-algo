@@ -6,7 +6,7 @@ type Props = {
 
 const MainLayout: React.FC<Props> = ({ children }) => {
   return (
-    <div className="min-h-screen bg-black text-white font-sans">
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-white font-sans">
       <header className="w-full py-5 px-6 bg-gradient-to-r from-gray-900 to-gray-800 shadow-md flex justify-between items-center">
         <h1 className="text-2xl font-bold tracking-tight">Q-ALGO Terminal</h1>
         <div className="text-sm text-gray-400">SPY 0DTE Mesh Intelligence</div>

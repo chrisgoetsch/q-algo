@@ -1,86 +1,141 @@
-# File: core/prediction_engine.py
-# Combines XGBoost + GPT to forecast SPY 0DTE direction + action
+# File: core/prediction_engine.py (refactored for v2)
+"""Generates directional forecasts for SPY 0‑DTE using an XGBoost model and an
+OpenAI‑powered scenario generator, then logs a merged forecast.
 
-import os
-import json
-import joblib
-import openai
-import numpy as np
+Highlights
+----------
+• Lazy‑loads model/scaler exactly once (module‑level cache)
+• Structured JSON logging through core.logger_setup
+• GPT call is optional: if OPENAI_API_KEY missing, we gracefully degrade
+• `hybrid_forecast()` returns consistent schema: {direction, confidence, method, ...}
+"""
+from __future__ import annotations
+
+import os, json, functools
+from typing import Dict, Any
+
+import numpy as np, joblib
 from dotenv import load_dotenv
-from core.forecast_logger import log_forecast
-from core.qthink_scenario_planner import simulate_market_scenario
 
+from core.logger_setup import get_logger
+from core.qthink_scenario_planner import simulate_market_scenario
+from core.forecast_logger import log_forecast
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Environment / paths
+# ---------------------------------------------------------------------------
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 
 MODEL_PATH = "memory/predictive/model/prediction_model.pkl"
 SCALER_PATH = "memory/predictive/model/feature_scaler.pkl"
 
-def predict_with_model(state_vector: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Lazy loaders to avoid re‑reading pickle on every call
+# ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def _load_model():
+    if not os.path.exists(MODEL_PATH):
+        logger.warning({"event": "model_missing", "path": MODEL_PATH})
+        return None
+    return joblib.load(MODEL_PATH)
+
+
+@functools.lru_cache(maxsize=1)
+def _load_scaler():
+    if not os.path.exists(SCALER_PATH):
+        logger.warning({"event": "scaler_missing", "path": SCALER_PATH})
+        return None
+    return joblib.load(SCALER_PATH)
+
+# ---------------------------------------------------------------------------
+# ML model prediction
+# ---------------------------------------------------------------------------
+
+def predict_with_model(state_vec: Dict[str, float]) -> Dict[str, Any]:
+    model = _load_model()
+    scaler = _load_scaler()
+    if not model or not scaler:
+        return {"error": "model_or_scaler_unavailable", "method": "xgboost"}
     try:
-        model = joblib.load(MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
-        feature_vector = np.array([list(state_vector.values())])
-        features_scaled = scaler.transform(feature_vector)
-        probs = model.predict_proba(features_scaled)[0]
+        X = np.array([list(state_vec.values())])
+        Xs = scaler.transform(X)
+        probs = model.predict_proba(Xs)[0]
         direction = "bullish" if probs[1] > probs[0] else "bearish"
         return {
             "direction": direction,
             "confidence": float(max(probs)),
-            "method": "xgboost"
+            "method": "xgboost",
         }
     except Exception as e:
-        return {"error": f"Model failure: {e}", "method": "xgboost"}
+        logger.error({"event": "model_predict_fail", "err": str(e)})
+        return {"error": str(e), "method": "xgboost"}
 
-def forecast_with_gpt(state_vector: dict) -> dict:
+# ---------------------------------------------------------------------------
+# GPT scenario forecast (placeholder – using internal simulator)
+# ---------------------------------------------------------------------------
+
+def forecast_with_gpt(state_vec: Dict[str, float]) -> Dict[str, Any]:
+    if not OPENAI_KEY:
+        return {"error": "no_api_key", "method": "gpt"}
     try:
-        result = simulate_market_scenario(state_vector)
+        scenario = simulate_market_scenario(state_vec)
+        direction = scenario.get("direction", "n/a")
         return {
-            "direction": "n/a",
+            "direction": direction,
             "confidence": 0.65,
-            "gpt_rationale": result.get("scenario"),
-            "method": "gpt"
+            "gpt_rationale": scenario.get("scenario"),
+            "method": "gpt",
         }
     except Exception as e:
+        logger.error({"event": "gpt_forecast_fail", "err": str(e)})
         return {"error": str(e), "method": "gpt"}
 
-def hybrid_forecast(state_vector: dict) -> dict:
-    ml_result = predict_with_model(state_vector)
-    gpt_result = forecast_with_gpt(state_vector)
+# ---------------------------------------------------------------------------
+# Hybrid forecast – picks best available
+# ---------------------------------------------------------------------------
 
-    if "error" in ml_result and "error" in gpt_result:
+def hybrid_forecast(state_vec: Dict[str, float]) -> Dict[str, Any]:
+    ml = predict_with_model(state_vec)
+    gpt = forecast_with_gpt(state_vec)
+
+    if "error" in ml and "error" in gpt:
         final = {
             "direction": "unknown",
             "confidence": 0.5,
             "method": "fallback",
-            "gpt_rationale": gpt_result.get("error"),
-            "error": ml_result.get("error")
+            "errors": {"ml": ml.get("error"), "gpt": gpt.get("error")},
         }
-    elif "error" in ml_result:
-        final = gpt_result
+    elif "error" in ml:
+        final = gpt
     else:
-        final = ml_result
-        final["gpt_rationale"] = gpt_result.get("gpt_rationale", "")
+        final = ml
+        if "gpt_rationale" in gpt:
+            final["gpt_rationale"] = gpt["gpt_rationale"]
 
-    log_forecast(
-        model_name="HybridModel-v1",
-        forecast=final,
-        confidence=final.get("confidence", 0.5),
-        context=state_vector
-    )
+    # Persist forecast
+    try:
+        log_forecast("HybridModel-v2", final, final.get("confidence", 0.5), state_vec)
+    except Exception as e:
+        logger.error({"event": "forecast_log_fail", "err": str(e)})
 
     return final
 
+# ---------------------------------------------------------------------------
+# CLI self‑test
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     test_state = {
         "spy_price": 436.12,
         "vix": 16.2,
-        "gex": -800000000,
-        "dex": 900000000,
+        "gex": -8e8,
+        "dex": 9e8,
         "vwap_diff": -0.15,
         "skew": 1.10,
         "macro_flag": 0,
-        "time_of_day_bin": 2
+        "time_of_day_bin": 2,
     }
-    forecast = hybrid_forecast(test_state)
-    print(json.dumps(forecast, indent=2))
+    print(json.dumps(hybrid_forecast(test_state), indent=2))
