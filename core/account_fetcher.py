@@ -1,61 +1,67 @@
-# File: core/account_fetcher.py
-"""Fetches Tradier account buying‑power & equity and syncs logs/open_trades.jsonl.
-
-This module now relies exclusively on the refreshed helpers in core.tradier_client
-and core.open_trade_tracker so it maps cleanly onto the new Tradier flow.
+# ─────────────────────────────────────────────────────────────────────────────
+# File: core/account_fetcher.py         (HF-compatible)
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+Pulls the latest Tradier equity / buying-power snapshot and reconciles
+logs/open_trades.jsonl with live broker positions.
 """
 from __future__ import annotations
 
-import os, json
+import json, os
 from datetime import datetime
-from typing import Tuple
+from pathlib import Path
 
-from core.env_validator import validate_env
-from core.capital_manager import get_tradier_buying_power
-from core.logger_setup import logger
+from core.env_validator   import validate_env
+from core.capital_manager import (
+    fetch_tradier_equity,
+    get_tradier_buying_power,
+)
+from core.logger_setup     import logger
 from core.open_trade_tracker import sync_open_trades_with_tradier
 
 # Validate env once on import (masked output)
-validate_env(mask=True)
+validate_env()
 
-ACCOUNT_SUMMARY_PATH = "logs/account_summary.json"
+ACCOUNT_SUMMARY_PATH = Path("logs/account_summary.json")
 
 # ---------------------------------------------------------------------------
-# Equity / buying‑power fetch
+# Equity + BP fetch
 # ---------------------------------------------------------------------------
+def fetch_tradier_snapshot(verbose: bool = False) -> dict:
+    """
+    Return {"equity": float, "buying_power": float} and write
+    logs/account_summary.json.  Caches values <= 30 s old.
+    """
+    equity = fetch_tradier_equity(force_refresh=True)   # triggers async refresh if stale
+    bp     = get_tradier_buying_power()                 # cached value (same refresh)
 
-def fetch_tradier_equity() -> Tuple[float, float]:
-    """Pulls buying power & equity, writes logs/account_summary.json, returns tuple.
-    Will raise if Tradier call fails inside get_tradier_buying_power()."""
-    buying_power, equity = get_tradier_buying_power(verbose=True)
-
-    entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "equity": equity,
-        "buying_power": buying_power,
+    summary = {
+        "timestamp":    datetime.utcnow().isoformat(),
+        "equity":       equity,
+        "buying_power": bp,
     }
-    os.makedirs(os.path.dirname(ACCOUNT_SUMMARY_PATH), exist_ok=True)
-    with open(ACCOUNT_SUMMARY_PATH, "w") as fh:
-        json.dump(entry, fh, indent=2)
 
-    logger.info({"event": "balance_check", "equity": equity, "buying_power": buying_power})
-    print(f"✅ Equity ${equity:,.2f} | BP ${buying_power:,.2f}")
-    return buying_power, equity
+    ACCOUNT_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ACCOUNT_SUMMARY_PATH.write_text(json.dumps(summary, indent=2))
+
+    logger.info({"event": "balance_check", "equity": equity, "buying_power": bp})
+    if verbose:
+        print(f"✅ Equity ${equity:,.2f} | BP ${bp:,.2f}")
+
+    return summary
 
 # ---------------------------------------------------------------------------
 # Helper to reconcile local open_trades with live broker positions
 # ---------------------------------------------------------------------------
-
-def reconcile_open_trades():
-    """Delegates to core.open_trade_tracker.sync_open_trades_with_tradier()."""
+def reconcile_open_trades() -> None:
+    """Brings logs/open_trades.jsonl in sync with Tradier account positions."""
     print("🔄 Reconciling open_trades.jsonl with live Tradier positions…")
     sync_open_trades_with_tradier()
 
 # ---------------------------------------------------------------------------
-# CLI test harness
+# CLI self-test
 # ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    fetch_tradier_equity()
+    fetch_tradier_snapshot(verbose=True)
     reconcile_open_trades()
-    print("✨ account_fetcher.py self‑test complete.")
+    print("✨ account_fetcher.py self-test complete.")
