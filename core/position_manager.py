@@ -1,9 +1,4 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# File: core/open_trade_tracker.py
-# (unchanged from previous revisions – still present earlier in this canvas)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # File: core/position_manager.py  — FULL VERSION (final)
 # ─────────────────────────────────────────────────────────────────────────────
 """Real‑time position supervision for Q‑ALGO v2

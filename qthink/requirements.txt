@@ -1,0 +1,7 @@
+openai
+python-dotenv
+gitpython
+faiss-cpu  # optional if you build vector memory
+PyGithub
+flask
+

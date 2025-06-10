@@ -1,63 +1,139 @@
-# File: core/live_price_tracker.py  (refactored)
-"""Light‑weight price fetcher with staleness guard.
+# ─────────────────────────────────────────────────────────────────────────────
+# File: core/live_price_tracker.py           (v3-HF, polished)
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+Real-time option snapshot & price utilities for Q-ALGO hedge-fund stack.
 
-It prefers the mid‑price from the websocket cache, falls back to last trade,
-then to Polygon REST (one quick call) if both cache values are zero or stale.
+* Resilient JSON parsing (handles Polygon’s occasional numeric top-level)
+* Async-first API with single-flight cache (one HTTP hit per symbol/15 s)
+* Sync wrappers keep legacy code working
+* Always returns a dict with keys:
+      price, iv, volume, skew, delta, gamma
 """
 from __future__ import annotations
 
+import asyncio
+import math
+import os
 import time
-from datetime import datetime, timedelta
-from typing import Optional
+from pathlib import Path
+from typing import Dict, Tuple, Any, List
 
-from polygon.polygon_websocket import SPY_LIVE_PRICE
-from polygon.polygon_rest import get_underlying_snapshot
+import httpx
+
 from core.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Globals
+# Config
 # ---------------------------------------------------------------------------
-_STALE_AFTER_SEC = 15  # websocket price considered stale after 15s
-_last_rest_fetch: float = 0.0
-_last_rest_price: float = 0.0
+POLYGON_API_KEY  = os.getenv("POLYGON_API_KEY", "")
+POLYGON_BASE_URL = "https://api.polygon.io/v3/snapshot/options"
+CACHE_TTL        = 15  # seconds
 
 # ---------------------------------------------------------------------------
-# Helper
+# In-memory cache with in-flight single-flight control
 # ---------------------------------------------------------------------------
+class _SnapshotCache:
+    def __init__(self):
+        self._data : Dict[str, Tuple[float, dict]] = {}
+        self._locks: Dict[str, asyncio.Lock]        = {}
 
-def _websocket_price() -> Optional[float]:
-    ts = SPY_LIVE_PRICE.get("timestamp")  # assume ws code fills this in epoch sec
-    if ts and time.time() - ts > _STALE_AFTER_SEC:
-        return None  # stale
-    return SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade")
+    def fresh(self, sym: str) -> bool:
+        ts, _ = self._data.get(sym, (0, {}))
+        return (time.time() - ts) < CACHE_TTL
 
+    def get(self, sym: str) -> dict | None:
+        if self.fresh(sym):
+            return self._data[sym][1]
+        return None
 
-def _rest_price() -> float:
-    global _last_rest_fetch, _last_rest_price
-    if time.time() - _last_rest_fetch < _STALE_AFTER_SEC:
-        return _last_rest_price  # return cached REST price
+    def set(self, sym: str, payload: dict):
+        self._data[sym] = (time.time(), payload)
+
+    def lock(self, sym: str) -> asyncio.Lock:
+        self._locks.setdefault(sym, asyncio.Lock())
+        return self._locks[sym]
+
+_CACHE = _SnapshotCache()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _safe_get(d: Any, *keys, default=0.0):
+    """Navigate nested dicts defensively; return *default* on any error."""
     try:
-        snap = get_underlying_snapshot("SPY")
-        _last_rest_price = float(snap.get("mid", 0) or snap.get("lastPrice", 0))
-        _last_rest_fetch = time.time()
-    except Exception as e:
-        logger.error({"event": "rest_price_fail", "err": str(e)})
-        _last_rest_price = 0.0
-    return _last_rest_price
+        for k in keys:
+            d = d[k]
+        return float(d) if d is not None else default
+    except Exception:
+        return default
+
+async def _fetch_snapshot(symbol: str) -> dict:
+    url = f"{POLYGON_BASE_URL}/{symbol}?apiKey={POLYGON_API_KEY}"
+    async with httpx.AsyncClient(timeout=8.0) as cli:
+        r = await cli.get(url)
+        r.raise_for_status()
+        return r.json()
+
+async def _retrieve(symbol: str) -> dict:
+    # single-flight per symbol
+    async with _CACHE.lock(symbol):
+        cached = _CACHE.get(symbol)
+        if cached is not None:
+            return cached
+        try:
+            payload = await _fetch_snapshot(symbol)
+            _CACHE.set(symbol, payload)
+            logger.debug({"event": "polygon_snapshot", "symbol": symbol})
+            return payload
+        except Exception as e:
+            logger.error({"event": "polygon_snapshot_fail", "err": str(e)})
+            return {}
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+async def get_option_metrics(symbol: str = "SPY") -> Dict[str, float]:
+    """
+    Return ATM 0-DTE option metrics.
+    Keys: price, iv, volume, skew, delta, gamma
+    """
+    snap = await _retrieve(symbol)
 
-def get_current_spy_price() -> float:
-    """Return best‑available SPY price (mid preferred)."""
-    price = _websocket_price()
-    if price:
-        return price
-    return _rest_price()
+    underlying_price = _safe_get(snap, "results", "underlying_asset", "last", "price")
 
-# CLI test
-if __name__ == "__main__":
-    print("SPY price →", get_current_spy_price())
+    options_list: List[dict] = (
+        snap.get("results", {}).get("options", [])
+        if isinstance(snap.get("results", {}).get("options", []), list)
+        else []
+    )
+
+    if not options_list:
+        return dict(price=underlying_price, iv=0, volume=0, skew=0, delta=0, gamma=0)
+
+    today = time.strftime("%Y-%m-%d")
+
+    def _score(opt: dict) -> float:
+        try:
+            delta_score = abs(abs(opt["delta"]) - 0.5)
+            exp_penalty = 0 if opt["details"]["expiration_date"] == today else 10
+            return delta_score + exp_penalty
+        except Exception:
+            return math.inf
+
+    best = min(options_list, key=_score)
+
+    return {
+        "price":  underlying_price,
+        "iv":     _safe_get(best, "iv"),
+        "volume": _safe_get(best, "volume"),
+        "skew":   _safe_get(best, "skew"),
+        "delta":  _safe_get(best, "delta"),
+        "gamma":  _safe_get(best, "gamma"),
+    }
+
+# Legacy sync shim (will be removed once callers migrate)
+def get_option_metrics_sync(symbol: str = "SPY") -> Dict[str, float]:
+    return asyncio.run(get_option_metrics(symbol))

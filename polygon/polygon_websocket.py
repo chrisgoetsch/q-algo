@@ -1,89 +1,93 @@
-# File: polygon/polygon_websocket.py
+# ─────────────────────────────────────────────────────────────────────────────
+# File: polygon/polygon_websocket.py   (HF upgrade)
+# ─────────────────────────────────────────────────────────────────────────────
+"""Lightweight Polygon WebSocket listener that keeps a live SPY price cache."""
+
+from __future__ import annotations
+import json, os, threading, time
+from typing import Final
 
 import websocket
-import threading
-import json
-import os
-import time
 from dotenv import load_dotenv
+from core.logger_setup import get_logger
 
 load_dotenv()
+logger = get_logger(__name__)
 
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+POLYGON_API_KEY: Final[str] = os.getenv("POLYGON_API_KEY", "")
+
 SPY_LIVE_PRICE = {
-    "mid": None,
-    "last_trade": None,
-    "bid": None,
-    "ask": None,
-    "timestamp": None
+    "mid":        None,   # bid/ask midpoint
+    "last_trade": None,   # last trade price
+    "bid":        None,
+    "ask":        None,
+    "timestamp":  None,   # epoch ms from Polygon
 }
 
+# ---------------------------------------------------------------------------#
+# WebSocket callbacks                                                        #
+# ---------------------------------------------------------------------------#
+def _on_open(ws):
+    logger.info({"event": "ws_open"})
+    ws.send(json.dumps({"action": "auth", "params": POLYGON_API_KEY}))
+    ws.send(json.dumps({"action": "subscribe", "params": "Q.SPY,T.SPY"}))
+    logger.info({"event": "ws_subscribed", "channels": ["Q.SPY", "T.SPY"]})
 
-def on_open(ws):
-    print("[Polygon WS] Connection opened.")
-    auth_data = {
-        "action": "auth",
-        "params": POLYGON_API_KEY
-    }
-    ws.send(json.dumps(auth_data))
-
-    # ✅ Subscribe to both quote and trade events for SPY
-    sub_data = {
-        "action": "subscribe",
-        "params": "Q.SPY,T.SPY"
-    }
-    ws.send(json.dumps(sub_data))
-    print("[Polygon WS] Subscribed to: Q.SPY and T.SPY")
-
-def on_message(ws, message):
-    global SPY_LIVE_PRICE
+def _on_message(ws, message: str):
     try:
-        data = json.loads(message)
-        for update in data:
-            ev = update.get("ev")
-            timestamp = update.get("t", 0)
+        for update in json.loads(message):
+            ev  = update.get("ev")
+            ts  = update.get("t", 0)
 
-            if ev == "Q":  # Equity quote
-                ask = update.get("ap", 0)
-                bid = update.get("bp", 0)
-                if ask and bid:
-                    mid = (ask + bid) / 2
-                    SPY_LIVE_PRICE["price"] = mid
-                    SPY_LIVE_PRICE["timestamp"] = timestamp
-                    print(f"[Polygon WS] SPY Mid Price (Q): {mid:.2f}")
+            if ev == "Q":                         # quote update
+                bid = update.get("bp") or 0
+                ask = update.get("ap") or 0
+                if bid and ask:
+                    SPY_LIVE_PRICE.update({
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": (bid + ask) / 2,
+                        "timestamp": ts,
+                    })
+                    logger.debug({"event": "ws_mid", "mid": SPY_LIVE_PRICE["mid"]})
 
-            elif ev == "T":  # Equity trade
-                price = update.get("p", 0)
-                if not SPY_LIVE_PRICE["price"]:  # fallback if no quote yet
-                    SPY_LIVE_PRICE["price"] = price
-                    SPY_LIVE_PRICE["timestamp"] = timestamp
-                    print(f"[Polygon WS] SPY Last Trade Price (T): {price:.2f}")
-
+            elif ev == "T":                       # trade update
+                price = update.get("p") or 0
+                if price:
+                    SPY_LIVE_PRICE.update({
+                        "last_trade": price,
+                        "timestamp": ts,
+                    })
+                    logger.debug({"event": "ws_trade", "price": price})
     except Exception as e:
-        print(f"[Polygon WS] Error parsing message: {e}")
+        logger.warning({"event": "ws_parse_fail", "err": str(e)})
 
-def on_error(ws, error):
-    print(f"[Polygon WS] Error: {error}")
+def _on_error(_, error):
+    logger.error({"event": "ws_error", "err": str(error)})
 
-def on_close(ws, close_status_code, close_msg):
-    print(f"[Polygon WS] Connection closed: {close_status_code} - {close_msg}")
+def _on_close(_, code, msg):
+    logger.warning({"event": "ws_close", "code": code, "msg": msg})
 
-def start_polygon_websocket():
+# ---------------------------------------------------------------------------#
+# Public entrypoint                                                          #
+# ---------------------------------------------------------------------------#
+def start_polygon_listener(channels=None):
+    """Non-blocking; spawns a daemon thread."""
     websocket.enableTrace(False)
     ws = websocket.WebSocketApp(
         "wss://socket.polygon.io/stocks",
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
+        on_open=_on_open,
+        on_message=_on_message,
+        on_error=_on_error,
+        on_close=_on_close,
     )
-    wst = threading.Thread(target=ws.run_forever)
-    wst.daemon = True
-    wst.start()
-    print("[Polygon WS] WebSocket thread started.")
+    th = threading.Thread(target=ws.run_forever, daemon=True)
+    th.start()
+    logger.info({"event": "ws_thread_started"})
+    # give the socket 1–2 s to auth+sub before the caller proceeds
     time.sleep(2)
 
 if __name__ == "__main__":
-    start_polygon_websocket()
+    start_polygon_listener()
     while True:
         time.sleep(1)
