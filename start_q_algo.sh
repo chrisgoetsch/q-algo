@@ -7,7 +7,7 @@ echo "🔄 Sourcing environment..."
 source .env
 
 echo "🚀 Running Preflight Check..."
-python3 preflight_check.py
+python preflight_check.py
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

@@ -231,8 +231,9 @@ async def evaluate_entry(symbol: str = "SPY", default_threshold: float | None = 
 
     except Exception as e:
         logger.error({"event": "evaluate_entry_fail", "err": str(e)})
+        print(f"[evaluate_entry] error → {e}")
         return False
-
+    
 # ---------------------------------------------------------------------------
 # CLI self-test
 # ---------------------------------------------------------------------------
