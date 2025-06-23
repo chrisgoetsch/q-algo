@@ -13,15 +13,32 @@ that require a paid plan.
 from __future__ import annotations
 import asyncio
 from typing import Dict
-
+import os
+import requests
+from dotenv import load_dotenv
 from core.live_price_tracker import (
     get_option_metrics      as _metrics_async,
     get_option_metrics_sync as _metrics_sync,
 )
-
 # ---------------------------------------------------------------------------
 # Option metrics
 # ---------------------------------------------------------------------------
+
+# Load environment variables
+load_dotenv()
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+# ---------------------------------------------------------------------------
+def get_polygon_snapshot_options(symbol: str) -> list:
+    try:
+        url = f"https://api.polygon.io/v3/snapshot/options/{symbol}?apiKey={POLYGON_API_KEY}"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("results", [])
+    except Exception as e:
+        print(f"[polygon_rest] snapshot fetch error → {e}")
+        return []
+
 def get_option_metrics(symbol: str = "SPY") -> Dict[str, float]:
     """SYNC helper used by entry_learner (runs in a thread)."""
     return _metrics_sync(symbol)

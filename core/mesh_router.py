@@ -62,7 +62,15 @@ def get_mesh_signal(context: Dict) -> Dict:
 
 def _score_mesh_signals(symbol: str, context: Dict | None = None) -> Dict:
     context = context or {}
-    perf = load_agent_performance()
+    perf = {
+    "q_block": {"score": 90},
+    "q_trap": {"score": 92},
+    "q_quant": {"score": 95},
+    "q_precision": {"score": 93},
+    "q_scout": {"score": 91},
+    "q_0dte_brain": {"score": 85}
+}
+
 
     triggered: List[str] = []
     agent_scores: Dict[str, float] = {}

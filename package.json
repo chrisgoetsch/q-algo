@@ -1,26 +1,61 @@
 {
   
   "name": "q-algo-v2",
+  
   "version": "1.0.0",
+  
   "description": "Q-ALGO v2 monorepo root: Express API + Vite/React dashboard with HMR, Tailwind, ESLint, and Nodemon.",
+  
   "type": "commonjs",
+  
   "main": "server.js",
+  
   "scripts": {
-    "dev": "concurrently \"npm run dev --prefix frontend\" \"nodemon server.js\"",
-    "start": "node server.js"
+  
+    
+  "dev": "concurrently \"npm run dev --prefix frontend\" \"nodemon server.js\"",
+  
+    
+  "start": "node server.js"
+  
   },
+  
   "directories": {
-    "test": "tests"
+  
+    
+  "test": "tests"
+  
   },
+  
   "keywords": [],
+  
   "author": "",
+  
   "license": "ISC",
+  
   "dependencies": {
-    "express": "^5.1.0",
-    "lightweight-charts": "^4.2.3"
+  
+    
+  "body-parser": "^2.2.0",
+  
+    
+  "cors": "^2.8.5",
+  
+    
+  "express": "^5.1.0",
+  
+    
+  "lightweight-charts": "^4.2.3"
+  
   },
+  
   "devDependencies": {
-    "concurrently": "^9.1.2",
-    "nodemon": "^3.1.10"
+  
+    
+  "concurrently": "^9.1.2",
+  
+    
+  "nodemon": "^3.1.10"
+  
   }
 }

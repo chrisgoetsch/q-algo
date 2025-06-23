@@ -12,7 +12,7 @@ Key points
 • Back-compat helpers preserved (_RISK_TABLE, log_allocation_update).
 """
 from __future__ import annotations
-
+import time
 import asyncio, os, random, time
 from typing import Dict
 
@@ -47,6 +47,24 @@ _balance: Dict[str, float] | None = None
 _last_fetch: float = 0.0
 _backoff:    float = POLL_BASE_SECS
 
+
+def safe_fetch_tradier_equity(retries: int = 2, delay: float = 0.5) -> float:
+    for attempt in range(retries + 1):
+        eq = fetch_tradier_equity()
+        if eq > 0:
+            return eq
+        if attempt < retries:
+            time.sleep(delay)
+    return eq  # may still be 0
+
+def safe_get_tradier_buying_power(retries: int = 2, delay: float = 0.5) -> float:
+    for attempt in range(retries + 1):
+        bp = get_tradier_buying_power()
+        if bp > 0:
+            return bp
+        if attempt < retries:
+            time.sleep(delay)
+    return bp  # may still be 0
 
 async def _refresh_balance(client: httpx.AsyncClient):
     """Fetch balances once, updating the shared SWR cache."""
@@ -114,7 +132,11 @@ def _lookup_risk_pct(equity: float) -> float:
 
 
 def get_current_allocation() -> float:
-    return _lookup_risk_pct(fetch_tradier_equity())
+    override = os.getenv("FORCED_ALLOCATION_OVERRIDE")
+    if override:
+        print(f"📐 Using FORCED_ALLOCATION_OVERRIDE = {override}")
+        return float(override)
+
 
 
 def evaluate_drawdown_throttle(equity: float, baseline: float) -> float:

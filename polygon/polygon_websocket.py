@@ -1,77 +1,79 @@
-# ── polygon/polygon_websocket.py ───────────────────────────────────────────
-from __future__ import annotations
+# File: polygon/polygon_websocket.py
 
-import asyncio, json, os, time
-from typing import Final
-
+import asyncio
+import json
+import os
+import time
 import websockets
+from threading import Thread
 from dotenv import load_dotenv
-from core.logger_setup import get_logger
 
 load_dotenv()
-logger = get_logger(__name__)
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+WS_URL = "wss://socket.polygon.io/options"
 
-POLYGON_API_KEY: Final[str] = os.getenv("POLYGON_API_KEY", "")
-POLYGON_WS_URL : Final[str] = "wss://socket.polygon.io/stocks"
+SPY_LIVE_PRICE = {}
+OPTION_TICK_DATA = {}
 
-# the only two keys other modules ever read ↓
-SPY_LIVE_PRICE: dict[str, float | None] = {
-    "mid":        None,   # bid/ask midpoint
-    "last_trade": None,   # last trade price
-    "timestamp":  None,   # epoch ns
-}
+_ws_conn = None
+_subscribed_symbols = set()
+auth_ready = asyncio.Event()
 
-# ---------------------------------------------------------------------------#
-# WebSocket driver                                                           #
-# ---------------------------------------------------------------------------#
-async def _listen_forever() -> None:
-    uri = POLYGON_WS_URL
-    while True:
+async def _listener():
+    global _ws_conn
+    async with websockets.connect(WS_URL) as websocket:
+        _ws_conn = websocket
+        await websocket.send(json.dumps({"action": "auth", "params": POLYGON_API_KEY}))
+        
+        while True:
+            msg = await websocket.recv()
+            parsed = json.loads(msg)
+            if isinstance(parsed, list) and parsed and parsed[0].get("status") == "auth_success":
+                print("[websocket] authenticated")
+                auth_ready.set()  # ← SET AUTH FLAG HERE
+                break
+
+        print("[websocket] ready for symbol subscriptions")
+
+        while True:
+            try:
+                msg = await websocket.recv()
+                parsed = json.loads(msg)
+                _update_option_ticks(parsed)
+            except Exception as e:
+                print(f"[websocket] error: {e}")
+                await asyncio.sleep(2)
+                auth_ready.clear()  # ← RESET ON RECONNECT
+                break
+
+def start_polygon_listener():
+    Thread(target=lambda: asyncio.run(_listener()), daemon=True).start()
+
+
+def _update_option_ticks(messages):
+    for msg in messages:
+        if msg.get("ev") == "T" and "sym" in msg:
+            sym = msg["sym"]
+            OPTION_TICK_DATA[sym] = {
+                "price": msg.get("p"),
+                "timestamp": time.time(),
+            }
+def subscribe_to_option_symbol(symbol: str):
+    """Subscribe to O:<contract> format after auth_ready is set."""
+    global _ws_conn
+    if not symbol or symbol in _subscribed_symbols:
+        return
+
+    async def _subscribe():
+        await auth_ready.wait()  # ← Wait for auth before subscribing
         try:
-            async with websockets.connect(uri) as ws:
-                logger.info({"event": "ws_connected"})
-                await ws.send(json.dumps({"action": "auth", "params": POLYGON_API_KEY}))
-                await ws.send(json.dumps({"action": "subscribe",
-                                          "params": "Q.SPY,T.SPY"}))
+            if not symbol.startswith("O:"):
+                symbol = f"O:{symbol}"
+            msg = json.dumps({"action": "subscribe", "params": symbol})
+            await _ws_conn.send(msg)
+            _subscribed_symbols.add(symbol)
+            print(f"[websocket] subscribed to {symbol}")
+        except Exception as e:
+            print(f"[websocket] failed to subscribe {symbol}: {e}")
 
-                while True:
-                    for event in json.loads(await ws.recv()):
-                        ev = event.get("ev")
-                        ts = event.get("t")
-
-                        if ev == "Q":             # quote
-                            bid, ask = event.get("bp"), event.get("ap")
-                            if bid and ask:
-                                SPY_LIVE_PRICE.update({
-                                    "mid":       (bid + ask) / 2,
-                                    "timestamp": ts,
-                                })
-
-                        elif ev == "T":           # trade
-                            price = event.get("p")
-                            if price:
-                                SPY_LIVE_PRICE.update({
-                                    "last_trade": price,
-                                    "timestamp" : ts,
-                                })
-        except Exception as e:                    # network hiccup → retry
-            logger.warning({"event": "ws_error", "err": str(e)})
-            await asyncio.sleep(5)
-
-# ---------------------------------------------------------------------------#
-# Bootstrap helper – **call this once** at start-up                          #
-# ---------------------------------------------------------------------------#
-def start_polygon_listener() -> None:
-    """
-    Fire-and-forget bootstrap.  Example::
-
-        from polygon.polygon_websocket import start_polygon_listener
-        start_polygon_listener()
-    """
-    loop = asyncio.get_running_loop()
-    loop.create_task(_listen_forever())
-    logger.info({"event": "ws_task_spawned"})
-
-# CLI quick-test ------------------------------------------------------------
-if __name__ == "__main__":
-    asyncio.run(_listen_forever())
+    asyncio.run_coroutine_threadsafe(_subscribe(), asyncio.get_event_loop())

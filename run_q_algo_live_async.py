@@ -28,7 +28,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 import core.asyncio_shim                              # noqa: E402
 
-from polygon.polygon_websocket import start_polygon_listener, SPY_LIVE_PRICE
+from core.capital_manager import safe_get_tradier_buying_power
+bp = safe_get_tradier_buying_power()
+from core.option_selector import select_best_0dte_option
+from core.telegram_alerts import send_telegram_alert
+from polygon.polygon_websocket import start_polygon_listener, SPY_LIVE_PRICE, subscribe_to_option_symbol
 from core.env_validator    import validate_env
 from core.trade_engine     import open_position
 from core.position_manager import manage_positions
@@ -41,7 +45,7 @@ from core.market_hours       import (
 )
 from core.capital_manager    import (
     fetch_tradier_equity, get_tradier_buying_power, get_current_allocation,
-    evaluate_drawdown_throttle, compute_position_size, poll_balance_loop,
+    evaluate_drawdown_throttle, compute_position_size, poll_balance_loop, safe_fetch_tradier_equity
 )
 from core.logger_setup import get_logger
 logger = get_logger(__name__)
@@ -49,7 +53,7 @@ logger = get_logger(__name__)
 # ── constants ───────────────────────────────────────────────────────────────
 HEARTBEAT_EVERY     = 10
 MAX_WS_IDLE_SECONDS = 300
-ENTRY_THRESHOLD     = 0.60
+ENTRY_THRESHOLD     = 0.55
 _CYCLE_PAUSE        = 2
 
 # ── shutdown flag ───────────────────────────────────────────────────────────
@@ -62,46 +66,81 @@ _BULLISH = {"bullish", "trending", "stable"}
 _BEARISH = {"bearish", "panic", "choppy"}
 
 async def _entry_worker(eq_now: float, baseline: float):
+    print("🔍 Evaluating entry cycle…")
     mid = SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade")
     if mid is None or not is_0dte_trading_window_now():
         return
+
+    regime = "unknown"
+    side = "call"
+
     try:
-        meta = await evaluate_entry("SPY", default_threshold=ENTRY_THRESHOLD, want_meta=True)
-    except TypeError:                                   # backward-compat
-        ok = await evaluate_entry("SPY", default_threshold=ENTRY_THRESHOLD)
-        meta = {"passes": ok, "score": 0.0, "regime": "unknown"}
+        opt = select_best_0dte_option("SPY", side)
+        if not opt or not opt["symbol"]:
+            cprint("⚠️ No valid 0DTE option found", style="yellow")
+            return
+
+        # ✅ Sanitize and subscribe to option symbol
+        symbol = opt["symbol"]
+        if not symbol.startswith("O:"):
+            cprint(f"⚠️ missing prefix – patching with 'O:' → was: {symbol}", style="yellow")
+            symbol = f"O:{symbol}"
+        if not symbol.startswith("O:SPY"):
+            cprint(f"❌ symbol format looks invalid: {symbol}", style="red")
+
+            cprint(f"🧩 subscribing to {symbol}", style="magenta")
+            subscribe_to_option_symbol(symbol)
+
+        # 🎯 Evaluate entry
+        meta = await evaluate_entry(
+            symbol=opt["symbol"],
+            default_threshold=ENTRY_THRESHOLD,
+            want_meta=True
+        )
+    except Exception as e:
+        cprint(f"❌ Entry eval error: {e}", style="red")
+        return
 
     if not meta.get("passes"):
-        cprint(f"⚪ Score {meta.get('score',0):.2f} below {ENTRY_THRESHOLD}", style="white")
+        cprint(f"⚪ Score {meta.get('score', 0):.2f} below {ENTRY_THRESHOLD}", style="white")
         return
 
     regime = meta.get("regime", "unknown")
-    side   = "CALL" if regime in _BULLISH else "PUT"
+    side = "CALL" if regime in _BULLISH else "PUT"
 
     alloc_base = get_current_allocation()
-    throttle   = evaluate_drawdown_throttle(eq_now, baseline)
-    alloc_pct  = round(alloc_base * throttle, 4)
-    pos_frac   = compute_position_size(alloc_pct, 1, 0.9)
-    contracts  = max(1, int(pos_frac * 10))
+    throttle = evaluate_drawdown_throttle(eq_now, baseline)
+    alloc_pct = round(alloc_base * throttle, 4)
+    pos_frac = compute_position_size(alloc_pct, 1, 0.9)
+    contracts = max(1, int(pos_frac * 10))
+
+    send_telegram_alert(
+        f"*TRADE ALERT 🟢*\n"
+        f"{side} {contracts}x SPY\n"
+        f"*Score:* {meta['score']:.2f} | *Regime:* {regime}\n"
+        f"*Reason:* {meta.get('gpt_reasoning', 'n/a')}\n"
+        f"*Alloc:* {alloc_pct:.1%}"
+    )
 
     cprint(f"📊 score {meta['score']:.3f} regime {regime} → {side}", style="cyan")
     cprint(f"🔷 alloc {alloc_base:.3f}×{throttle:.2f}={alloc_pct:.3f} "
            f"→ kelly {pos_frac:.3f} → {contracts} contracts", style="blue")
 
     try:
-        order = await asyncio.to_thread(open_position, "SPY", contracts, "C" if side=="CALL" else "P")
+        order = await asyncio.to_thread(open_position, opt["symbol"], contracts, "C" if side == "CALL" else "P")
         cprint(f"🟢 Order {side} {contracts}x status {order.get('status')}", style="green")
-        logger.info({"event":"order_submitted","side":side,"contracts":contracts,"resp":order})
+        logger.info({"event": "order_submitted", "side": side, "contracts": contracts, "resp": order})
         log_open_trade(
-            f"SPY_{datetime.utcnow().isoformat(timespec='seconds')}",
+            opt["symbol"],
             agent="qthink",
-            direction="long" if side=="CALL" else "short",
-            strike=0, expiry="0DTE",
-            meta={"allocation":alloc_pct,"contracts":contracts},
+            direction="long" if side == "CALL" else "short",
+            strike=opt["strike"],
+            expiry=opt["expiry"],
+            meta={"allocation": alloc_pct, "contracts": contracts},
         )
     except Exception as e:
         cprint(f"❌ Order failed: {e}", style="red")
-        logger.error({"event":"order_fail","err":str(e)})
+        logger.error({"event": "order_fail", "err": str(e)})
 
 # ── heartbeat ───────────────────────────────────────────────────────────────
 async def _heartbeat():
@@ -113,7 +152,9 @@ async def _heartbeat():
             open_ct = len(load_runtime_state().get("open_trades", []))
 
             last_ts = SPY_LIVE_PRICE.get("timestamp") or 0
-            ws_ok   = (time.time() - last_ts) < MAX_WS_IDLE_SECONDS
+            last_ws = SPY_LIVE_PRICE.get("timestamp")
+            ws_ok   = (last_ws is not None and time.time() - last_ws < MAX_WS_IDLE_SECONDS)
+
             flag    = "OPEN" if is_0dte_trading_window_now() else "CLOSED"
 
             cprint(f"🫀 {datetime.utcnow().time().isoformat(timespec='seconds')} | "
@@ -127,7 +168,7 @@ async def _heartbeat():
 
 # ── main loop ───────────────────────────────────────────────────────────────
 async def main():
-    cprint("🚀 [bold]Q-ALGO hedge-fund loop booting…[/bold]")
+    cprint("🚀 Q-ALGO hedge-fund loop booting…", style="bold green")
     load_dotenv(); validate_env()
     sync_open_trades_with_tradier(); run_recovery()
 
@@ -135,7 +176,7 @@ async def main():
     asyncio.create_task(poll_balance_loop())
     asyncio.create_task(_heartbeat())
 
-    baseline_eq = fetch_tradier_equity() or 1.0
+    baseline_eq = safe_fetch_tradier_equity() or 1.0
 
     while not _shutdown.is_set():
         start = time.time()

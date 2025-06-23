@@ -1,7 +1,7 @@
 # File: analytics/train_from_memory.py
 
 from mesh.q_0dte_memory import summarize_patterns_with_outcomes
-from qthink_pattern_matcher import gpt_reflect_on_patterns
+from qthink.qthink_pattern_matcher import gpt_reflect_on_patterns
 import json
 from datetime import datetime
 import os
