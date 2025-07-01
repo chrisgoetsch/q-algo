@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 import openai
 from dotenv import load_dotenv
-from utils.gpt_resilient_call import safe_chat_completion_request
+from core.utils.gpt_resilient_call import safe_chat_completion_request
 
 load_dotenv()
 

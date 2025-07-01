@@ -1,19 +1,18 @@
-# q_0dte_brain.py
-# Learns and scores SPY 0DTE market state patterns using memory and GPT reflection
+# File: mesh/q_0dte_brain.py
+# Purpose: Pattern-based brain using SPY microstructure and GPT reflection
 
 import json
 from datetime import datetime
 from mesh.q_0dte_memory import store_snapshot, fetch_recent_snapshots
 from qthink.qthink_pattern_matcher import gpt_reflect_on_patterns
+from polygon.polygon_utils import (
+    get_vwap_diff,
+    get_gex_score,
+    get_skew,
+    get_intraday_returns
+)
 
-# Optional: advanced scoring engine coming later
 def score_current_state(state_vector: dict) -> dict:
-    """
-    Analyze current state vector and return:
-    - Pattern tag
-    - Confidence score
-    - Trade suggestion (e.g., 'buy call', 'scalp put', 'stand down')
-    """
     spy_price = state_vector.get("spy_price", 0)
     vwap_diff = state_vector.get("vwap_diff", 0)
     skew = state_vector.get("skew", 1.0)
@@ -23,7 +22,6 @@ def score_current_state(state_vector: dict) -> dict:
     suggestion = "stand down"
     confidence = 0.5
 
-    # Rule-based classification for now
     if gex < -800_000_000 and vwap_diff < -0.1 and skew > 1.1:
         pattern = "gamma_fade"
         suggestion = "scalp put"
@@ -45,31 +43,55 @@ def score_current_state(state_vector: dict) -> dict:
     }
 
 def score_and_log(state_vector: dict):
-    """Wrapper to score state + log snapshot."""
     scored = score_current_state(state_vector)
     store_snapshot(state_vector, pattern_tag=scored["pattern_tag"])
     return scored
 
 def compare_to_memory():
-    """Runs GPT reflection on past 0DTE setups stored in memory."""
     recent = fetch_recent_snapshots(limit=20)
     summary = {
-        "tags": [snap["pattern_tag"] for snap in recent if 
-snap["pattern_tag"]],
-        "result_outcomes": [snap["result"] for snap in recent if 
-snap["result"]]
+        "tags": [snap.get("pattern_tag", "") for snap in recent if snap.get("pattern_tag")],
+        "result_outcomes": [snap.get("result", "") for snap in recent if snap.get("result")]
     }
-    return gpt_reflect_on_patterns(summary)
+    try:
+        reflection = gpt_reflect_on_patterns(summary)
+        if isinstance(reflection, dict):
+            return reflection
+        else:
+            return {"error": "unexpected GPT output", "raw": reflection}
+    except Exception as e:
+        return {"error": str(e), "status": "GPT reflection failed"}
 
-if __name__ == "__main__":
-    test_vector = {
-        "spy_price": 437.15,
-        "vix": 15.9,
-        "gex": -900_000_000,
-        "dex": 930_000_000,
-        "vwap_diff": -0.17,
-        "skew": 1.13
-    }
-    result = score_and_log(test_vector)
-    print("🧠 Q-0DTE Pattern Scored:", json.dumps(result, indent=2))
+# Live signal builder for mesh_router
+def get_0dte_brain_signal() -> dict:
+    try:
+        vwap_diff = get_vwap_diff("SPY")
+        gex = get_gex_score("SPY")
+        skew = get_skew("SPY")
+        spy_return = get_intraday_returns("SPY")
 
+        state = {
+            "spy_price": spy_return.get("price", 0),
+            "vwap_diff": vwap_diff,
+            "gex": gex,
+            "skew": skew,
+            "return": spy_return.get("return", 0)
+        }
+
+        result = score_and_log(state)
+        return {
+            "agent": "q_0dte_brain",
+            "score": result["confidence"],
+            "direction": "call" if result["suggested_action"] == "buy call" else "put",
+            "pattern": result["pattern_tag"],
+            "confidence": round(result["confidence"] * 100),
+            "features": state,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        from core.logger_setup import logger
+        logger.warning({"event": "q_0dte_brain_fail", "error": str(e)})
+        return None
+
+# Mesh entrypoint
+brain_score = score_and_log

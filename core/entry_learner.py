@@ -1,4 +1,4 @@
-# File: core/entry_learner.py  (v1.5 - final meta patch with GPT integration)
+# File: core/entry_learner.py — v2.1 optimized for multi-agent mesh scoring
 
 from __future__ import annotations
 import os, json, asyncio
@@ -19,10 +19,9 @@ logger = get_logger(__name__)
 
 MODEL_PATH = "core/models/entry_model.pkl"
 REINFORCEMENT_PROFILE_PATH = os.getenv("REINFORCEMENT_PROFILE_PATH", "assistants/reinforcement_profile.json")
-SCORE_LOG_PATH = os.getenv("SCORE_LOG_PATH", "logs/qthink_score_breakdown.jsonl")
-MODEL_VERSION = "entry-model-v1.5"
-
+MODEL_VERSION = "entry-model-v2.1"
 ENTRY_THRESHOLD = float(os.getenv("ENTRY_THRESHOLD", "0.55"))
+
 REGIME_THRESHOLDS = {
     "panic": 0.80,
     "bearish": 0.75,
@@ -45,14 +44,6 @@ model = _load_model()
 def _price() -> float:
     return SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade") or 0.0
 
-def _load_profile() -> Dict[str, int]:
-    try:
-        if os.path.exists(REINFORCEMENT_PROFILE_PATH):
-            return json.load(open(REINFORCEMENT_PROFILE_PATH))
-    except Exception as e:
-        logger.error({"event": "reinforcement_load_fail", "err": str(e)})
-    return {}
-
 def _feature_frame(ctx: dict) -> pd.DataFrame:
     base = {
         "price": ctx.get("price", 0),
@@ -73,6 +64,70 @@ def _feature_frame(ctx: dict) -> pd.DataFrame:
         df = df.reindex(columns=model.feature_names_in_, fill_value=0)
     return df
 
+async def evaluate_entry(symbol: str = "SPY", default_threshold: float | None = None, want_meta: bool = False, force_trade: bool = False) -> bool | dict:
+    threshold_base = default_threshold if default_threshold is not None else ENTRY_THRESHOLD
+
+    try:
+        ctx = {
+            "symbol": symbol,
+            "price": _price(),
+            "volume": 0,
+            "iv": 0,
+            "delta": 0,
+            "gamma": 0,
+            "skew": 0,
+            "dealer_flow": 0,
+        }
+
+        opt = await asyncio.to_thread(get_option_metrics, symbol)
+        if isinstance(opt, list):
+            opt = next((o for o in opt if isinstance(o, dict) and "delta" in o), {})
+
+        if not isinstance(opt, dict) or not opt.get("delta"):
+            raise ValueError(f"Malformed or missing option data for {symbol}: {repr(opt)}")
+
+        dealer = await asyncio.to_thread(get_dealer_flow_metrics, symbol) or {}
+
+        ctx.update({
+            "volume": opt.get("volume", 0),
+            "iv": opt.get("iv", 0),
+            "delta": opt.get("delta", 0),
+            "gamma": opt.get("gamma", 0),
+            "skew": opt.get("skew", 0),
+            "dealer_flow": dealer.get("score", 0),
+        })
+
+        score, rationale, regime, mesh = await asyncio.to_thread(score_entry, ctx)
+
+        threshold = REGIME_THRESHOLDS.get(regime, threshold_base)
+        decision = force_trade or score >= threshold
+
+        logger.info({
+            "event": "entry_accepted" if decision else "entry_rejected",
+            "score": round(score, 3),
+            "threshold": threshold,
+            "regime": regime
+        })
+
+        result = {
+            "score": score,
+            "rationale": rationale,
+            "regime": regime,
+            "passes": decision,
+            "agent_signals": mesh.get("agent_signals", {}),
+            "mesh_score": mesh.get("score", 0),
+            "gpt_confidence": round(score, 3),
+            "gpt_reasoning": rationale,
+            "greeks": ctx,
+        }
+
+        return result if want_meta else decision
+
+    except Exception as e:
+        logger.error({"event": "evaluate_entry_fail", "symbol": symbol, "err": str(e)})
+        print(f"[evaluate_entry] error → {e}")
+        return False if not want_meta else {"error": str(e), "passes": False}
+
 def score_entry(ctx: dict) -> Tuple[float, str, str, dict]:
     mesh = get_mesh_signal(ctx)
     if mesh.get("score", 0) >= 99:
@@ -85,114 +140,32 @@ def score_entry(ctx: dict) -> Tuple[float, str, str, dict]:
         "alpha_decay": ctx.get("alpha_decay", 0.1),
     })
 
-    df = _feature_frame(ctx)
-    if df.empty:
-        return 0.0, "empty_feature_frame", "n/a", mesh
-
-    profile = _load_profile()
-    penalties = sum(profile.get(k, 0) for k in ("bad", "conflict", "regret"))
-    boosts = sum(profile.get(k, 0) for k in ("strong", "profit"))
-    regime = forecast_market_regime(ctx)
-    regime_mod = {
-        "panic": -0.30,
-        "bearish": -0.20,
-        "choppy": -0.10,
-        "stable": 0.00,
-        "bullish": 0.10,
-        "trending": 0.20,
-    }.get(regime, 0.0)
-
-    raw = model.predict_proba(df)[0][1] if model else 0.0
-    adjusted = raw + 0.05 * boosts - 0.05 * penalties + regime_mod
-    mesh_pct = ctx["mesh_confidence"] / 100.0
-    mesh_boost = 0.25 + 0.75 * mesh_pct ** 2
-    final = 0.50 * adjusted + 0.50 * mesh_boost
-
-    rationale = (
-        f"ml={raw:.2f} adj={adjusted:.2f} mesh={ctx['mesh_confidence']:.1f} regime={regime} → {final:.2f}"
-    )
-
-    log_data = {
-        "final": round(final, 4),
-        "raw": round(raw, 4),
-        "mesh": ctx["mesh_confidence"],
-        "regime": regime,
-        "agent_signals": mesh.get("agent_signals", {}),
-        "reason": rationale
-    }
-    asyncio.run(log_score_breakdown_async(log_data))
-
-    return round(final, 4), rationale, regime, mesh
-
-async def evaluate_entry(symbol: str = "SPY", default_threshold: float | None = None, want_meta: bool = False, force_trade: bool = False) -> bool | dict:
-    threshold_base = default_threshold if default_threshold is not None else ENTRY_THRESHOLD
+    if model is None:
+        return 0.50, "model missing", "unknown", ctx
 
     try:
-        opt = await asyncio.to_thread(get_option_metrics, symbol)
-        if isinstance(opt, list):
-            opt = opt[0] if opt else {}
-        if not opt:
-            return False if not want_meta else {"error": "empty_option_chain", "passes": False}
+        df = _feature_frame(ctx)
+        prob = model.predict_proba(df)[0][1]
+        rationale = f"ml={prob:.2f} mesh={ctx['mesh_confidence']} → {prob:.2f}"
+        regime = next((k for k, v in REGIME_THRESHOLDS.items() if prob >= v), "unknown")
 
-        dealer = await asyncio.to_thread(get_dealer_flow_metrics, symbol) or {}
-        greeks = {
-            "iv": opt.get("iv", 0),
-            "delta": opt.get("delta", 0),
-            "gamma": opt.get("gamma", 0),
-            "skew": opt.get("skew", 0),
-        }
-
-        ctx = {
-            "symbol": symbol,
-            "price": _price(),
-            "volume": opt.get("volume", 0),
-            **greeks,
-            "dealer_flow": dealer.get("score", 0),
-        }
-
-        score, rationale, regime, mesh = await asyncio.to_thread(score_entry, ctx)
-        threshold = REGIME_THRESHOLDS.get(regime, threshold_base)
-        decision = force_trade or score >= threshold
-
-        if decision:
-            logger.info({
-                "event": "entry_accepted",
-                "score": round(score, 3),
-                "threshold": threshold,
-                "regime": regime
-            })
-        else:
-            logger.info({
-                "event": "entry_rejected",
-                "score": round(score, 3),
-                "threshold": threshold,
-                "regime": regime
-            })
-
-        result = {
-            "score": score,
-            "rationale": rationale,
+        ctx.update({
+            "model_score": prob,
             "regime": regime,
-            "passes": decision,
-            "agent_signals": mesh.get("agent_signals", {}),
-            "mesh_score": mesh.get("score", 0),
-            "gpt_confidence": round(score, 3),  # used as placeholder
-            "gpt_reasoning": rationale,
-            "greeks": greeks,
-        }
+            "rationale": rationale,
+            "model_version": MODEL_VERSION
+        })
 
-        return result if want_meta else decision
+        asyncio.run(log_score_breakdown_async({
+            "final": round(prob, 4),
+            "mesh": ctx["mesh_confidence"],
+            "regime": regime,
+            "agent_signals": mesh.get("agent_signals", {}),
+            "reason": rationale
+        }))
+
+        return round(prob, 4), rationale, regime, ctx
 
     except Exception as e:
-        logger.error({"event": "evaluate_entry_fail", "err": str(e)})
-        print(f"[evaluate_entry] error → {e}")
-        return False if not want_meta else {"error": str(e), "passes": False}
-
-if __name__ == "__main__":
-    import asyncio as aio
-
-    async def _test():
-        meta = await evaluate_entry("SPY", want_meta=True, force_trade=True)
-        print("entry meta →", meta)
-
-    aio.run(_test())
+        logger.warning({"event": "ml_score_failed", "err": str(e)})
+        return 0.50, "ml fail", "unknown", ctx

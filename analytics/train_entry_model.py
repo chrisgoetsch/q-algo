@@ -1,6 +1,7 @@
-# File: analytics/train_entry_model.py
+# File: analytics/train_entry_model.py — patched for mesh_log.jsonl support
 
 import os
+import json
 import pandas as pd
 import joblib
 import matplotlib.pyplot as plt
@@ -10,23 +11,41 @@ from xgboost import XGBClassifier
 
 # Paths
 CSV_PATH = "data/spy_0dte_merged_cleaned.csv"
+JSONL_PATH = "logs/mesh_log.jsonl"
 MODEL_SAVE_PATH = "core/models/entry_model.pkl"
 FEATURE_PLOT_PATH = "logs/xgboost_feature_importance.png"
 
 # Load training data
 
-def load_training_data():
+def load_from_jsonl(path=JSONL_PATH, auto_label=True, threshold=90):
+    print(f"🔍 Loading from JSONL: {path}")
+    rows = []
+    with open(path, "r") as f:
+        for line in f:
+            try:
+                j = json.loads(line)
+                if "agent_signals" not in j:
+                    continue
+                row = {**j["agent_signals"]}
+                row["mesh_score"] = j.get("mesh_score", 0)
+                row["label"] = j.get("label")
+                if auto_label:
+                    row["label"] = 1 if row["mesh_score"] >= threshold else 0
+                if row["label"] is not None:
+                    rows.append(row)
+            except Exception as e:
+                print(f"⚠️ Skipping malformed row: {e}")
+    df = pd.DataFrame(rows)
+    print(f"✅ Loaded {len(df)} rows from mesh log")
+    return df.drop(columns=["label"]), df["label"]
+
+def load_from_csv():
     if not os.path.exists(CSV_PATH):
         raise FileNotFoundError(f"Missing training file: {CSV_PATH}")
     df = pd.read_csv(CSV_PATH)
     if "label" not in df.columns:
         raise ValueError("Training set must include a 'label' column")
-
-    X = df.drop(columns=["label"])
-    y = df["label"]
-    return X, y
-
-# Train + plot
+    return df.drop(columns=["label"]), df["label"]
 
 def plot_feature_importance(model, feature_names):
     importance = model.feature_importances_
@@ -42,7 +61,6 @@ def plot_feature_importance(model, feature_names):
     os.makedirs(os.path.dirname(FEATURE_PLOT_PATH), exist_ok=True)
     plt.savefig(FEATURE_PLOT_PATH)
     print(f"📊 Feature importance saved to {FEATURE_PLOT_PATH}")
-
 
 def train_and_save_model(X, y):
     if len(y.unique()) < 2:
@@ -63,7 +81,11 @@ def train_and_save_model(X, y):
 
     plot_feature_importance(model, list(X.columns))
 
-
 if __name__ == "__main__":
-    X, y = load_training_data()
+    try:
+        X, y = load_from_jsonl()
+    except Exception as e:
+        print(f"⚠️ Failed loading from JSONL: {e}. Falling back to CSV.")
+        X, y = load_from_csv()
+
     train_and_save_model(X, y)

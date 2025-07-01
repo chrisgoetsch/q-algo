@@ -62,18 +62,43 @@ def subscribe_to_option_symbol(symbol: str):
     """Subscribe to O:<contract> format after auth_ready is set."""
     global _ws_conn
     if not symbol or symbol in _subscribed_symbols:
+        print(f"⚠️ Skipping symbol (already subscribed or empty): {repr(symbol)}")
         return
 
     async def _subscribe():
-        await auth_ready.wait()  # ← Wait for auth before subscribing
+        await auth_ready.wait()
         try:
             if not symbol.startswith("O:"):
+                print(f"⚠️ Missing prefix → patching {repr(symbol)}")
                 symbol = f"O:{symbol}"
+
+            print(f"🧩 Subscribing to: {repr(symbol)}")
             msg = json.dumps({"action": "subscribe", "params": symbol})
             await _ws_conn.send(msg)
             _subscribed_symbols.add(symbol)
             print(f"[websocket] subscribed to {symbol}")
         except Exception as e:
             print(f"[websocket] failed to subscribe {symbol}: {e}")
+
+    asyncio.run_coroutine_threadsafe(_subscribe(), asyncio.get_event_loop())
+
+
+async def _subscribe():
+    await auth_ready.wait()
+    try:
+        original = symbol
+        if not symbol.startswith("O:"):
+            print(f"⚠️ Missing prefix → patching {original}")
+            symbol = f"O:{symbol}"
+
+        print(f"🧩 Subscribing to: {repr(symbol)}")  # ← shows exact characters
+
+        msg = json.dumps({"action": "subscribe", "params": symbol})
+        await _ws_conn.send(msg)
+        _subscribed_symbols.add(symbol)
+        print(f"[websocket] subscribed to {symbol}")
+    except Exception as e:
+        print(f"[websocket] failed to subscribe {symbol}: {e}")
+
 
     asyncio.run_coroutine_threadsafe(_subscribe(), asyncio.get_event_loop())

@@ -59,7 +59,46 @@
       "conditions": {
         "regimes_only": ["bullish", "trending", "choppy"],
         "exclude_if_vix_above": 28
+      }
+    },
+    "q_gamma": {
+      "enabled": true,
+      "base_score": 75,
+      "dynamic_weight": true,
+      "role": "dealer_positioning",
+      "conditions": {
+        "require_flip_zone": true,
+        "gex_min": -900000000
+      }
+    },
+    "q_shadow": {
+      "enabled": true,
+      "base_score": 72,
+      "dynamic_weight": true,
+      "role": "flow_detect",
+      "conditions": {
+        "min_options_volume": 200000,
+        "unusual_activity_only": true
+      }
+    },
+    "q_shield": {
+      "enabled": true,
+      "base_score": 65,
+      "dynamic_weight": false,
+      "role": "macro_guard",
+      "conditions": {
+        "vix_max": 30,
+        "vvix_alert": true
+      }
+    },
+    "q_think": {
+      "enabled": true,
+      "base_score": 88,
+      "dynamic_weight": true,
+      "role": "meta_decider",
+      "conditions": {
+        "allow_reflection": true
+      }
+    }
   }
-}
-}
 }

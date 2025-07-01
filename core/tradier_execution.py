@@ -1,16 +1,5 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# File: core/tradier_execution.py
-# Thin Tradier wrapper (options-only) with retry & structured logging.
-#
-# Exports
-# -------
-#   • get_atm_option_symbol()
-#   • submit_order()
-#
-# NOTE: The only functional change vs. your last version is that
-#       `get_tradier_buying_power` is imported *inside* submit_order()
-#       to break the circular-import chain with capital_manager.
-# ─────────────────────────────────────────────────────────────────────────────
+# File: core/tradier_execution.py  (v1.3 - patched for 200-ok bug + enhanced logging)
+
 from __future__ import annotations
 
 import os
@@ -21,20 +10,15 @@ from typing import Dict, Any, Optional, List
 from core.logger_setup import logger
 from core.resilient_request import resilient_get
 
-# ---------------------------------------------------------------------------#
-# Config & session helpers                                                   #
-# ---------------------------------------------------------------------------#
 TRADIER_API_KEY    = os.getenv("TRADIER_ACCESS_TOKEN", "")
 TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID", "")
-TRADIER_API_BASE   = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
+TRADIER_API_BASE   = os.getenv("TRADIER_API_BASE", "https://sandbox.tradier.com/v1").rstrip("/")
 
 _session = requests.Session()
-
 
 def _log(event: str, **kv):
     logger.info({"src": "tradier_exec", "event": event, **kv})
 
-# --- token-refresh stub ------------------------------------------------------
 def _token_is_expired() -> bool:
     ts = os.getenv("TRADIER_TOKEN_EXPIRES_AT")
     if not ts:
@@ -44,11 +28,9 @@ def _token_is_expired() -> bool:
     except Exception:
         return False
 
-
-def _refresh_tradier_token() -> None:  # placeholder – plug in your flow
+def _refresh_tradier_token() -> None:
     _log("token_refresh", note="stub_called")
     # TODO: invoke your refresh_token util and update env vars.
-
 
 def _headers() -> Dict[str, str]:
     global TRADIER_API_KEY
@@ -60,17 +42,10 @@ def _headers() -> Dict[str, str]:
         "Accept": "application/json",
     }
 
-# ---------------------------------------------------------------------------#
-# Utility helper                                                             #
-# ---------------------------------------------------------------------------#
 def _nearest(items: List[float], target: float) -> float:
     return min(items, key=lambda x: abs(x - target))
 
-# ---------------------------------------------------------------------------#
-# Public API                                                                  #
-# ---------------------------------------------------------------------------#
 def get_atm_option_symbol(symbol: str = "SPY", call_put: str = "C") -> Optional[str]:
-    """Return the OCC code for today’s (or tomorrow’s) at-the-money contract."""
     quote_url = f"{TRADIER_API_BASE}/markets/quotes"
     q_resp = resilient_get(quote_url, params={"symbols": symbol}, headers=_headers())
     if not q_resp:
@@ -114,11 +89,7 @@ def get_atm_option_symbol(symbol: str = "SPY", call_put: str = "C") -> Optional[
     _log("atm_option_symbol_failed", symbol=symbol)
     return None
 
-
 def submit_order(option_symbol: str, qty: int, side: str) -> Dict[str, Any]:
-    """Submit a market order to Tradier and return the API’s JSON response."""
-
-    # 🔑 deferred import -- breaks the circular dependency with capital_manager
     from core.capital_manager import get_tradier_buying_power
 
     if os.getenv("ALLOW_ORDER_SUBMISSION", "1") == "0":
@@ -130,7 +101,6 @@ def submit_order(option_symbol: str, qty: int, side: str) -> Dict[str, Any]:
         print("⚠️ Invalid order quantity (must be ≥1)")
         return {"status": "skipped", "reason": "invalid_qty"}
 
-    # Soft buying-power check
     bp = get_tradier_buying_power()
     if bp and bp < 1:
         _log("low_buying_power", buying_power=bp)
@@ -140,9 +110,9 @@ def submit_order(option_symbol: str, qty: int, side: str) -> Dict[str, Any]:
     url = f"{TRADIER_API_BASE}/accounts/{TRADIER_ACCOUNT_ID}/orders"
     payload = {
         "class": "option",
-        "symbol": "SPY",           # underlying ticker
+        "symbol": "SPY",
         "option_symbol": option_symbol,
-        "side": side,              # buy_to_open / sell_to_close
+        "side": side,
         "quantity": str(int(qty)),
         "type": "market",
         "duration": "day",
@@ -152,12 +122,16 @@ def submit_order(option_symbol: str, qty: int, side: str) -> Dict[str, Any]:
     resp = _session.post(url, headers=_headers(), data=payload, timeout=15)
     _log("submit_order_resp", status=resp.status_code, body=resp.text)
 
-    if resp.status_code != 201:
+    try:
+        data = resp.json()
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Tradier order HTTP {resp.status_code}: {resp.text}")
+        if "errors" in data:
+            _log("tradier_order_rejected", errors=data["errors"], raw=resp.text)
+            return {"status": "rejected", "errors": data["errors"], "raw": resp.text}
+        if "order" in data and data["order"].get("status") == "ok":
+            return {"status": "ok", "id": data["order"].get("id"), "raw": data}
         raise RuntimeError(f"Tradier order HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
-    if "errors" in data:
-        _log("tradier_order_rejected", errors=data["errors"], raw=resp.text)
-        return {"status": "rejected", "errors": data["errors"], "raw": resp.text}
-
-    return data
+    except Exception as e:
+        raise RuntimeError(f"Tradier order unexpected response: {str(e)}")
+ 

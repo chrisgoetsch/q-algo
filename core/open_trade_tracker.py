@@ -1,24 +1,5 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# File: core/open_trade_tracker.py                (v2-HF, cycle-safe revision)
-# ─────────────────────────────────────────────────────────────────────────────
-"""
-Keeps logs/open_trades.jsonl in sync with *confirmed* open Tradier orders.
+# File: core/open_trade_tracker.py — PATCHED with full entry metadata enforcement + float32 fix
 
-Key upgrades
-============
-1. **No more circular import.**
-   We no longer import `_headers` from `core.tradier_execution`; instead we
-   build headers locally.  Nothing in this module is imported by
-   `tradier_execution`, so the cycle is eliminated.
-
-2. **Config pulled once at module-load.**
-   • `TRADIER_ACCESS_TOKEN` is read up-front; if you do token-refreshing
-     elsewhere, point `TRADIER_TOKEN_PROVIDER()` to your helper.
-
-3. **Single resilient GET helper** that already plugs correct headers.
-
-4. **Strict typing & small clean-ups** (f-strings, path handling, etc.).
-"""
 from __future__ import annotations
 
 import os
@@ -27,36 +8,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import requests
-
+from polygon.polygon_websocket import SPY_LIVE_PRICE
 from core.logger_setup import logger
 from core.resilient_request import resilient_get
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────────────────────
+FILE = "logs/open_trades.jsonl"
+RECONCILIATION_LOG_PATH = Path("logs/reconciliation_log.jsonl")
+
 TRADIER_ACCESS_TOKEN = os.getenv("TRADIER_ACCESS_TOKEN", "")
-TRADIER_ACCOUNT_ID   = os.getenv("TRADIER_ACCOUNT_ID", "")
-TRADIER_API_BASE     = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
+TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID", "")
+TRADIER_API_BASE = os.getenv("TRADIER_API_BASE", "https://sandbox.tradier.com/v1").rstrip("/")
 
 OPEN_TRADES_PATH = Path("logs/open_trades.jsonl")
+TRADIER_TOKEN_PROVIDER = lambda: TRADIER_ACCESS_TOKEN
 
-# If you have a refresh-flow, expose it here; else returns cached token
-def TRADIER_TOKEN_PROVIDER() -> str:        # noqa: N802  (constant-like name intentional)
-    return TRADIER_ACCESS_TOKEN             # plug in refresh helper if needed
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 def _headers() -> dict[str, str]:
-    """Always build fresh headers so token refreshes propagate automatically."""
     return {
         "Authorization": f"Bearer {TRADIER_TOKEN_PROVIDER()}",
         "Accept": "application/json",
     }
 
 def _tradier_get(url: str, *, params: dict | None = None):
-    """Centralised GET with retries & auth headers."""
     return resilient_get(url, params=params, headers=_headers())
 
 def _atomic_append_line(path: Path, obj: dict):
@@ -70,11 +44,16 @@ def _load_jsonl(path: Path) -> list[dict]:
     with path.open() as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tradier order sync
-# ─────────────────────────────────────────────────────────────────────────────
+def _convert_floats(obj):
+    if isinstance(obj, dict):
+        return {k: _convert_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_floats(i) for i in obj]
+    elif isinstance(obj, np.float32) or isinstance(obj, float):
+        return float(obj)
+    return obj
+
 def fetch_open_tradier_orders() -> list[dict]:
-    """Return a *list* of open/filled Tradier option-orders."""
     url = f"{TRADIER_API_BASE}/accounts/{TRADIER_ACCOUNT_ID}/orders"
     try:
         resp = _tradier_get(url)
@@ -83,15 +62,12 @@ def fetch_open_tradier_orders() -> list[dict]:
 
         data = resp.json()
         raw = data.get("orders")
-        # Tradier returns {"orders":"null"} when there are none
         if raw in (None, "null"):
             return []
 
-        # ensure iterable
         if isinstance(raw, dict):
             raw = [raw]
 
-        # filter on status
         return [o for o in raw if o.get("status") in ("filled", "open")]
 
     except Exception as e:
@@ -99,8 +75,12 @@ def fetch_open_tradier_orders() -> list[dict]:
         return []
 
 def sync_open_trades_with_tradier() -> None:
-    """Write **one line per trade** to logs/open_trades.jsonl, append-only."""
     synced: list[dict] = []
+    current_open = load_open_trades()
+    if len(current_open) >= 1:
+        print(f"🚫 Sync skipped: already have open trade(s).")
+        return
+
     for order in fetch_open_tradier_orders():
         opt_sym = order.get("option_symbol") or order.get("symbol")
         if not opt_sym:
@@ -108,7 +88,7 @@ def sync_open_trades_with_tradier() -> None:
 
         trade = {
             "trade_id": f"{opt_sym}_{order['id']}",
-            "symbol":   opt_sym,
+            "symbol": opt_sym,
             "quantity": int(order.get("quantity", 1)),
             "entry_time": order.get("create_date", datetime.utcnow().isoformat()),
             "status": order.get("status"),
@@ -120,54 +100,91 @@ def sync_open_trades_with_tradier() -> None:
 
     print(f"🔄 {len(synced)} open trades written to {OPEN_TRADES_PATH}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public helpers used by trade_engine / position_manager
-# ─────────────────────────────────────────────────────────────────────────────
-def log_open_trade(
-    trade_id: str,
-    agent: str,
-    direction: str,
-    strike: float,
-    expiry: str,
-    meta: dict | None = None,
-) -> None:
-    entry = {
-        "trade_id":  trade_id,
-        "agent":     agent,
-        "direction": direction,
-        "strike":    strike,
-        "expiry":    expiry,
-        "timestamp": datetime.utcnow().isoformat(),
-        "meta":      meta or {},
-    }
-    _atomic_append_line(OPEN_TRADES_PATH, entry)
+def atomic_write_line(filepath, line_data):
+    try:
+        line_data = _convert_floats(line_data)
+        tmp_path = filepath + ".tmp"
+        with open(tmp_path, "w") as f:
+            f.write(json.dumps(line_data) + "\n")
+        with open(filepath, "a") as f:
+            f.write(json.dumps(line_data) + "\n")
+        os.replace(tmp_path, filepath)
+    except Exception as e:
+        print(f"❌ Failed to write open trade log: {e}")
 
-def track_open_trade(context: Dict) -> None:
-    """
-    Persist a freshly opened trade coming from trade_engine.
-    Expects *context* with keys: option_symbol, order_id, contracts, etc.
-    """
-    trade_id = context.get("trade_id") or f"{context['option_symbol']}_{datetime.utcnow().isoformat()}"
-    record = {
-        "trade_id":   trade_id,
-        "symbol":     context["option_symbol"],
-        "quantity":   int(context.get("contracts", 1)),
-        "entry_time": datetime.utcnow().isoformat(),
-        "order_id":   context.get("order_id"),
-        "score":      context.get("score"),
-        "mesh_agents": context.get("trigger_agents"),
-    }
-    _atomic_append_line(OPEN_TRADES_PATH, record)
-    print(f"📈 Trade logged → {trade_id}")
+def log_open_trade(option_symbol: str, agent: str, direction: str, strike: float | None, expiry: str | None, meta: dict):
+    try:
+        existing = load_open_trades()
+        if existing:
+            print(f"⏸️ Skipped log: position already open ({len(existing)} trades)")
+            return
 
-def load_open_trades(path: Path | str = OPEN_TRADES_PATH) -> list[dict]:
-    return _load_jsonl(Path(path))
+        entry = {
+            "trade_id": f"{option_symbol}_{meta.get('entry_time')}",
+            "option_symbol": option_symbol,
+            "entry_time": meta.get("entry_time"),
+            "entry_price": meta.get("entry_price", 0.0),
+            "direction": direction,
+            "agent": agent,
+            "strike": strike,
+            "expiry": expiry,
+            "allocation": meta.get("allocation", 0.0),
+            "contracts": meta.get("contracts", 0),
+            "score": meta.get("score"),
+            "regime": meta.get("regime", "unknown"),
+            "rationale": meta.get("rationale", "N/A"),
+            "mesh_score": meta.get("mesh_score"),
+            "agent_signals": meta.get("agent_signals"),
+            "mesh_context": meta.get("mesh_context"),
+            "gpt_confidence": meta.get("gpt_confidence"),
+            "gpt_reasoning": meta.get("gpt_reasoning"),
+        }
+
+        entry = _convert_floats(entry)
+        tmp_path = FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            f.write(json.dumps(entry) + "\n")
+        with open(FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        os.replace(tmp_path, FILE)
+    except Exception as e:
+        print(f"❌ Failed to log open trade: {e}")
+
+def load_open_trades() -> list[dict]:
+    try:
+        if not OPEN_TRADES_PATH.exists():
+            return []
+        with OPEN_TRADES_PATH.open("r") as f:
+            return [json.loads(line.strip()) for line in f if line.strip()]
+    except Exception as e:
+        logger.warning({"event": "load_open_trades_failed", "err": str(e)})
+        return []
+
 
 def remove_trade(trade_id: str) -> None:
-    """Used by position_manager when a leg is fully closed."""
-    trades   = load_open_trades()
-    remain   = [t for t in trades if t.get("trade_id") != trade_id]
-    OPEN_TRADES_PATH.write_text(
-        "\n".join(json.dumps(t, separators=(",", ":")) for t in remain) + ("\n" if remain else "")
-    )
-    print(f"🧹 Removed trade {trade_id}")
+    try:
+        trades = load_open_trades()
+        updated = [t for t in trades if t.get("trade_id") != trade_id]
+        with OPEN_TRADES_PATH.open("w") as f:
+            for entry in updated:
+                f.write(json.dumps(entry) + "\n")
+        print(f"🗑️ Removed trade {trade_id}")
+    except Exception as e:
+        logger.warning({"event": "remove_trade_failed", "trade_id": trade_id, "err": str(e)})
+
+def log_reconciliation(source: str, matched: list[dict]):
+    RECON_PATH = Path("logs/reconciliation_log.jsonl")
+    try:
+        RECON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RECON_PATH.open("a") as f:
+            for entry in matched:
+                f.write(json.dumps({
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "source": source,
+                    "matched_trade": entry
+                }) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to write reconciliation log: {e}")
+
+def track_open_trade(*args, **kwargs):
+    return log_open_trade(*args, **kwargs)

@@ -1,208 +1,193 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# File: run_q_algo_live_async.py   (v4b-HF-0DTE, 2025-06-14)
-# Hedge-fund-grade 0-DTE SPY scalper – calls & puts
-# ─────────────────────────────────────────────────────────────────────────────
+# File: run_q_algo_live_async.py — FINALIZED for Quant-Grade Execution Loop
+# Q-ALGO V2 Live Trading Orchestrator
+
 from __future__ import annotations
-import asyncio, signal, time
-# --- TaskGroup poly-fill (Python 3.10) --------------------------------------
-if not hasattr(asyncio, "TaskGroup"):
-    class _TG:                                          # minimal shim
-        def __init__(self): self._tasks: list[asyncio.Task] = []
-        async def __aenter__(self): return self
-        async def __aexit__(self, *_):
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        def create_task(self, coro): self._tasks.append(asyncio.create_task(coro))
-    asyncio.TaskGroup = _TG                    # type: ignore[attr-defined]
-
-# --- pretty printing --------------------------------------------------------
-from importlib.util import find_spec
-if find_spec("rich"):
-    from rich.console import Console
-    _con = Console()
-    def cprint(*a, **k): _con.print(*a, **k)
-else:
-    def cprint(msg, **_): print(msg)
-
-# --- third-party / local ----------------------------------------------------
+import asyncio, signal, time, os
 from datetime import datetime
 from dotenv import load_dotenv
-import core.asyncio_shim                              # noqa: E402
 
-from core.capital_manager import safe_get_tradier_buying_power
-bp = safe_get_tradier_buying_power()
-from core.option_selector import select_best_0dte_option
-from core.telegram_alerts import send_telegram_alert
-from polygon.polygon_websocket import start_polygon_listener, SPY_LIVE_PRICE, subscribe_to_option_symbol
-from core.env_validator    import validate_env
-from core.trade_engine     import open_position
-from core.position_manager import manage_positions
-from core.entry_learner    import evaluate_entry
-from core.open_trade_tracker import log_open_trade, sync_open_trades_with_tradier
-from core.recovery_manager   import run_recovery
-from core.runtime_state      import load_runtime_state
-from core.market_hours       import (
-    is_market_open_now, is_0dte_trading_window_now, get_market_status_string,
-)
-from core.capital_manager    import (
-    fetch_tradier_equity, get_tradier_buying_power, get_current_allocation,
-    evaluate_drawdown_throttle, compute_position_size, poll_balance_loop, safe_fetch_tradier_equity
-)
+from core.env_validator import validate_env
 from core.logger_setup import get_logger
+from preflight_check import run_preflight_check
+from core.reconciliation import reconcile_open_trades
+from core.recovery_manager import run_recovery
+from core.runtime_state import update_runtime_state
+from core.capital_manager import (
+    fetch_tradier_equity, get_tradier_buying_power,
+    get_current_allocation, evaluate_drawdown_throttle,
+    compute_position_size, poll_balance_loop
+)
+from core.position_manager import manage_positions
+from core.entry_learner import evaluate_entry
+from core.open_trade_tracker import log_open_trade, load_open_trades
+from core.trade_engine import open_position
+from core.telegram_alerts import send_telegram_alert
+from core.tradier_execution import get_atm_option_symbol
+from polygon.polygon_websocket import start_polygon_listener, SPY_LIVE_PRICE
+from polygon.stocks_websocket import start_spy_price_listener
+from core.market_hours import is_market_open_now, get_market_status_string, is_0dte_trading_window_now
+from analytics.technical_indicators import get_rsi, is_vwap_reclaim
+from core.mesh_router import summarize_votes
+from mesh.q_think import _log_qthink_summary
+
 logger = get_logger(__name__)
 
-# ── constants ───────────────────────────────────────────────────────────────
-HEARTBEAT_EVERY     = 10
+_HEARTBEAT_INTERVAL = 10
+_CYCLE_PAUSE = 2
+ENTRY_THRESHOLD = 0.55
 MAX_WS_IDLE_SECONDS = 300
-ENTRY_THRESHOLD     = 0.55
-_CYCLE_PAUSE        = 2
 
-# ── shutdown flag ───────────────────────────────────────────────────────────
 _shutdown = asyncio.Event()
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, lambda *_: _shutdown.set())
 
-# ── entry worker ────────────────────────────────────────────────────────────
-_BULLISH = {"bullish", "trending", "stable"}
-_BEARISH = {"bearish", "panic", "choppy"}
-
-async def _entry_worker(eq_now: float, baseline: float):
-    print("🔍 Evaluating entry cycle…")
-    mid = SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade")
-    if mid is None or not is_0dte_trading_window_now():
-        return
-
-    regime = "unknown"
-    side = "call"
-
-    try:
-        opt = select_best_0dte_option("SPY", side)
-        if not opt or not opt["symbol"]:
-            cprint("⚠️ No valid 0DTE option found", style="yellow")
-            return
-
-        # ✅ Sanitize and subscribe to option symbol
-        symbol = opt["symbol"]
-        if not symbol.startswith("O:"):
-            cprint(f"⚠️ missing prefix – patching with 'O:' → was: {symbol}", style="yellow")
-            symbol = f"O:{symbol}"
-        if not symbol.startswith("O:SPY"):
-            cprint(f"❌ symbol format looks invalid: {symbol}", style="red")
-
-            cprint(f"🧩 subscribing to {symbol}", style="magenta")
-            subscribe_to_option_symbol(symbol)
-
-        # 🎯 Evaluate entry
-        meta = await evaluate_entry(
-            symbol=opt["symbol"],
-            default_threshold=ENTRY_THRESHOLD,
-            want_meta=True
-        )
-    except Exception as e:
-        cprint(f"❌ Entry eval error: {e}", style="red")
-        return
-
-    if not meta.get("passes"):
-        cprint(f"⚪ Score {meta.get('score', 0):.2f} below {ENTRY_THRESHOLD}", style="white")
-        return
-
-    regime = meta.get("regime", "unknown")
-    side = "CALL" if regime in _BULLISH else "PUT"
-
-    alloc_base = get_current_allocation()
-    throttle = evaluate_drawdown_throttle(eq_now, baseline)
-    alloc_pct = round(alloc_base * throttle, 4)
-    pos_frac = compute_position_size(alloc_pct, 1, 0.9)
-    contracts = max(1, int(pos_frac * 10))
-
-    send_telegram_alert(
-        f"*TRADE ALERT 🟢*\n"
-        f"{side} {contracts}x SPY\n"
-        f"*Score:* {meta['score']:.2f} | *Regime:* {regime}\n"
-        f"*Reason:* {meta.get('gpt_reasoning', 'n/a')}\n"
-        f"*Alloc:* {alloc_pct:.1%}"
-    )
-
-    cprint(f"📊 score {meta['score']:.3f} regime {regime} → {side}", style="cyan")
-    cprint(f"🔷 alloc {alloc_base:.3f}×{throttle:.2f}={alloc_pct:.3f} "
-           f"→ kelly {pos_frac:.3f} → {contracts} contracts", style="blue")
-
-    try:
-        order = await asyncio.to_thread(open_position, opt["symbol"], contracts, "C" if side == "CALL" else "P")
-        cprint(f"🟢 Order {side} {contracts}x status {order.get('status')}", style="green")
-        logger.info({"event": "order_submitted", "side": side, "contracts": contracts, "resp": order})
-        log_open_trade(
-            opt["symbol"],
-            agent="qthink",
-            direction="long" if side == "CALL" else "short",
-            strike=opt["strike"],
-            expiry=opt["expiry"],
-            meta={"allocation": alloc_pct, "contracts": contracts},
-        )
-    except Exception as e:
-        cprint(f"❌ Order failed: {e}", style="red")
-        logger.error({"event": "order_fail", "err": str(e)})
-
-# ── heartbeat ───────────────────────────────────────────────────────────────
 async def _heartbeat():
     while not _shutdown.is_set():
         try:
-            eq  = fetch_tradier_equity()
-            bp  = get_tradier_buying_power()
+            eq = fetch_tradier_equity()
+            bp = get_tradier_buying_power()
             mid = SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade")
-            open_ct = len(load_runtime_state().get("open_trades", []))
+            ts = datetime.utcnow().strftime("%H:%M:%S")
+            print(f"🎯 {ts} | eq ${eq:,.0f} bp ${bp:,.0f} mid {mid} | 0-DTE {'OPEN' if is_0dte_trading_window_now() else 'CLOSED'}")
+        except Exception as e:
+            logger.error({"event": "heartbeat_fail", "err": str(e)})
+        await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
-            last_ts = SPY_LIVE_PRICE.get("timestamp") or 0
-            last_ws = SPY_LIVE_PRICE.get("timestamp")
-            ws_ok   = (last_ws is not None and time.time() - last_ws < MAX_WS_IDLE_SECONDS)
+async def _entry_cycle():
+    print("\n🔍 Evaluating entry signal...")
+    if not is_0dte_trading_window_now():
+        print("⌛ Market closed or not within 0-DTE window.")
+        return
 
-            flag    = "OPEN" if is_0dte_trading_window_now() else "CLOSED"
+    try:
+        equity = fetch_tradier_equity()
+    except Exception as e:
+        print(f"⚠️ Failed to fetch equity: {e}")
+        return
 
-            cprint(f"🫀 {datetime.utcnow().time().isoformat(timespec='seconds')} | "
-                   f"eq ${eq:,.0f} bp ${bp:,.0f} open {open_ct} "
-                   f"mid {mid if mid else 'n/a'} | 0-DTE {flag} | WS {'✔' if ws_ok else '✖'}",
-                   style="bold white")
-        except Exception as hb_err:
-            cprint(f"❌ heartbeat error: {hb_err}", style="red")
-            logger.error({"event":"heartbeat_fail","err":str(hb_err)})
-        await asyncio.sleep(HEARTBEAT_EVERY)
+    if equity < 100:
+        print("❌ Insufficient equity.")
+        return
 
-# ── main loop ───────────────────────────────────────────────────────────────
+    try:
+        open_trades = load_open_trades()
+    except Exception as e:
+        print(f"⚠️ Could not load open trades: {e}")
+        open_trades = []
+
+    if open_trades:
+        print("⏳ Skipping entry: open position exists.")
+        return
+
+    meta = await evaluate_entry(default_threshold=ENTRY_THRESHOLD, want_meta=True)
+    if not meta.get("passes"):
+        print(f"⚪ Entry rejected: score {meta.get('score', 0):.2f}")
+        return
+
+    score = meta["score"]
+    rationale = meta["rationale"]
+    regime = meta.get("regime", "unknown")
+    rsi = get_rsi("SPY")
+    vwap = is_vwap_reclaim("SPY")
+    mesh = meta.get("agent_signals", {})
+    mesh_score = summarize_votes(mesh)
+    gpt_bias = meta.get("gpt_reasoning", "n/a").lower()
+
+    bullish_agents = sum(1 for v in mesh.values() if v > 0.5)
+    bearish_agents = sum(1 for v in mesh.values() if v < -0.5)
+
+    vote_call = 0
+    vote_put = 0
+    if rsi < 35: vote_call += 1
+    elif rsi > 70: vote_put += 1
+    if vwap: vote_call += 1
+    else: vote_put += 1
+    if bullish_agents > bearish_agents: vote_call += 1
+    elif bearish_agents > bullish_agents: vote_put += 1
+    if "bullish" in gpt_bias: vote_call += 1
+    elif "bearish" in gpt_bias: vote_put += 1
+
+    side = "CALL" if vote_call > vote_put else "PUT"
+    option_type = "C" if side == "CALL" else "P"
+
+    opt_symbol = get_atm_option_symbol("SPY", call_put=option_type)
+    if not opt_symbol:
+        print("❌ Failed to resolve ATM option.")
+        return
+
+    alloc = get_current_allocation()
+    throttle = evaluate_drawdown_throttle(equity, equity)
+    pos_size = compute_position_size(alloc * throttle, 1, 0.9)
+    contracts = max(1, round(pos_size * 10 * (mesh_score / 100) * score))
+
+    print(f"\n✅ Entry score: {score:.3f} | regime: {regime} | rationale: {rationale}")
+    print(f"📊 {side} {contracts}x SPY | alloc={alloc:.2f} x throttle={throttle:.2f} → {alloc * throttle:.2f}")
+
+    try:
+        order = open_position(
+            symbol=opt_symbol,
+            contracts=contracts,
+            option_type=option_type,
+            score=score,
+            rationale=rationale
+        )
+        print(f"🚀 Order submitted → {order.get('order_id')} | tracking {order.get('trade_id')}")
+
+        update_runtime_state({
+            "last_trade_attempt": datetime.utcnow().isoformat(),
+            "mesh_score": mesh_score,
+            "regime": regime,
+            "entry_score": score
+        })
+
+        _log_qthink_summary({
+            "agent": "q_think",
+            "score": score,
+            "direction": side.lower(),
+            "rationale": rationale,
+            "mesh_votes": mesh,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    except Exception as e:
+        print(f"❌ Order failed: {e}")
+
 async def main():
-    cprint("🚀 Q-ALGO hedge-fund loop booting…", style="bold green")
-    load_dotenv(); validate_env()
-    sync_open_trades_with_tradier(); run_recovery()
-
+    load_dotenv()
+    validate_env()
+    run_preflight_check()
+    reconcile_open_trades()
+    run_recovery()
     start_polygon_listener()
+    start_spy_price_listener()
     asyncio.create_task(poll_balance_loop())
     asyncio.create_task(_heartbeat())
-
-    baseline_eq = safe_fetch_tradier_equity() or 1.0
 
     while not _shutdown.is_set():
         start = time.time()
         if not is_market_open_now():
-            cprint(f"⏳ Market {get_market_status_string()} – sleeping 30 s", style="yellow")
-            await asyncio.sleep(30); continue
+            print(f"⌛ {datetime.utcnow().isoformat()} - Market closed. Sleeping 30s...")
+            await asyncio.sleep(30)
+            continue
+
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(asyncio.to_thread(manage_positions))
-                tg.create_task(_entry_worker(fetch_tradier_equity(), baseline_eq))
+                tg.create_task(_entry_cycle())
 
             last_ts = SPY_LIVE_PRICE.get("timestamp") or 0
             if (time.time() - last_ts) > MAX_WS_IDLE_SECONDS:
-                cprint("🔄 WS stale → restart", style="yellow"); start_polygon_listener()
+                print("⚠️ WebSocket stale. Restarting listener.")
+                start_polygon_listener()
 
-            cprint(f"✅ Cycle {(time.time()-start):.2f}s", style="green")
+            print(f"✅ Loop cycle completed in {time.time() - start:.2f}s\n")
         except Exception as exc:
-            cprint(f"⚠️  Loop exception: {exc}", style="red")
-            logger.exception({"event":"main_loop_exception","err":str(exc)})
-            await asyncio.sleep(5)
+            print(f"⚠️ Loop error: {exc}")
+            logger.exception({"event": "main_loop_exception", "err": str(exc)})
         await asyncio.sleep(_CYCLE_PAUSE)
-    cprint("👋 Graceful shutdown", style="bold")
 
-# ── entrypoint ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print("\n👋 Graceful shutdown initiated.")

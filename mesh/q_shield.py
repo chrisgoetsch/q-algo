@@ -1,25 +1,30 @@
 # File: mesh/q_shield.py
-# Purpose: Detect macro volatility shocks using VIX, VVIX, and divergence from SPY
+# Q-ALGO v2 – Macro shock detector for SPY 0DTE defense layer
 
 import json
 from datetime import datetime
+from polygon.polygon_utils import get_intraday_returns
+from core.logger_setup import logger
 
 VIX_DATA_PATH = "data/vix_watchlist.json"
 
-def score_shield(context=None):
-    """
-    Emit a mesh agent-style confidence score based on macro volatility behavior.
-    Includes VIX levels, deltas, divergence from SPY, and VVIX spike detection.
-    """
 
+def get_shield_signal():
+    """
+    Detects macro volatility shocks using VIX, VVIX, and SPY divergence.
+    Emits directional defense signal with confidence and rationale.
+    """
     try:
         with open(VIX_DATA_PATH, "r") as f:
             vix_data = json.load(f)
     except Exception as e:
+        logger.warning({"agent": "q_shield", "event": "vix_data_load_fail", "error": str(e)})
         return {
+            "agent": "q_shield",
+            "confidence": 0.5,
+            "direction": "neutral",
             "score": 40,
-            "reason": "fallback",
-            "error": str(e),
+            "features": {},
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -35,11 +40,11 @@ def score_shield(context=None):
     delta_vix_1d = ((vix_now - vix_1d) / max(1, vix_1d)) * 100
     delta_vvix_1h = ((vvix_now - vvix_1h) / max(1, vvix_1h)) * 100
     spy_change = ((spy_now - spy_prev) / max(1, spy_prev)) * 100
+    intraday_rets = get_intraday_returns("SPY")
 
     reasons = []
-    score = 85  # Start high, reduce on warning signals
+    score = 85
 
-    # 1. Panic-level VIX
     if vix_now >= 28:
         reasons.append(f"panic vix {vix_now}")
         score -= 60
@@ -47,7 +52,6 @@ def score_shield(context=None):
         reasons.append(f"elevated vix {vix_now}")
         score -= 30
 
-    # 2. Sharp 1h or 1d VIX spike
     if delta_vix_1h >= 10:
         reasons.append(f"vix spike 1h +{delta_vix_1h:.1f}%")
         score -= 20
@@ -55,7 +59,6 @@ def score_shield(context=None):
         reasons.append(f"vix spike 1d +{delta_vix_1d:.1f}%")
         score -= 15
 
-    # 3. VVIX alert
     if delta_vvix_1h >= 12:
         reasons.append(f"vvix spike +{delta_vvix_1h:.1f}%")
         score -= 20
@@ -63,7 +66,6 @@ def score_shield(context=None):
         reasons.append(f"vvix high {vvix_now}")
         score -= 15
 
-    # 4. SPY/VIX divergence
     if spy_change > 0 and delta_vix_1h > 5:
         reasons.append("divergence: SPY↑ VIX↑")
         score -= 25
@@ -73,13 +75,22 @@ def score_shield(context=None):
 
     score = max(0, min(score, 100))
 
+    direction = "put" if score < 50 else "neutral"
+
     return {
-        "score": score,
-        "vix": vix_now,
-        "vvix": vvix_now,
-        "vix_1h_change_pct": delta_vix_1h,
-        "vvix_1h_change_pct": delta_vvix_1h,
-        "spy_change_pct": spy_change,
-        "reasons": reasons,
+        "agent": "q_shield",
+        "score": round(score / 100, 4),
+        "confidence": round(score, 2),
+        "direction": direction,
+        "features": {
+            "vix_now": vix_now,
+            "vvix_now": vvix_now,
+            "delta_vix_1h": delta_vix_1h,
+            "delta_vix_1d": delta_vix_1d,
+            "delta_vvix_1h": delta_vvix_1h,
+            "spy_change": spy_change,
+            "intraday_spy_return": intraday_rets,
+            "reasons": reasons
+        },
         "timestamp": datetime.utcnow().isoformat()
     }

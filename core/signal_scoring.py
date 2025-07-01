@@ -1,12 +1,11 @@
-# signal_scoring.py
-# Q-ALGO v2 - Scores agent signals using mesh_config weights
+# File: core/signal_scoring.py — upgraded for 10-agent mesh architecture
 
 import json
 import os
 
 CONFIG_PATH = "mesh/mesh_config.json"
 
-def load_agent_weights():
+def load_agent_config():
     try:
         if not os.path.exists(CONFIG_PATH):
             raise FileNotFoundError("mesh_config.json missing")
@@ -14,30 +13,37 @@ def load_agent_weights():
         with open(CONFIG_PATH, "r") as f:
             config = json.load(f)
 
-        weights = {}
-        for agent, data in config.get("agents", {}).items():
-            if data.get("enabled", False):
-                weights[agent] = data.get("weight", 0.5)
-
-        return weights
+        return config.get("agents", {})
 
     except Exception as e:
-        print(f"⚠️ Failed to load mesh weights: {e}")
+        print(f"⚠️ Failed to load mesh_config: {e}")
         return {}
 
-def score_signal(signal):
+
+def score_signal(signal: dict, context: dict | None = None) -> float:
+    """
+    Scores a mesh agent signal using its base score + confidence weighting
+    as defined in mesh_config.json.
+    """
     try:
         agent = signal.get("agent", "unknown")
         raw_score = signal.get("score", 0.5)
-        confidence = signal.get("confidence", 0.5)
+        confidence = signal.get("confidence", 50) / 100  # normalize
+        context = context or {}
 
-        weights = load_agent_weights()
-        weight = weights.get(agent, 0.5)
+        config = load_agent_config()
+        agent_cfg = config.get(agent, {})
 
-        final_score = weight * ((raw_score + confidence) / 2)
-        return round(final_score, 4)
+        if not agent_cfg.get("enabled", False):
+            return 0.0
+
+        base = agent_cfg.get("base_score", 50) / 100
+        decay = agent_cfg.get("decay_on_loss", 0.0)
+
+        # Simple weight: mix base + confidence
+        final = 0.5 * base + 0.5 * confidence
+        return round(final, 4)
 
     except Exception as e:
-        print(f"❌ Scoring error: {e}")
+        print(f"❌ Signal scoring failed: {e}")
         return 0.0
-

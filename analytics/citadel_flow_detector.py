@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 from core.live_price_tracker import get_current_spy_price
-from utils.atomic_write import atomic_append_jsonl
+from core.utils.atomic_write import atomic_append_jsonl
 
 CITADEL_FLOW_FOLDER = "logs/flow_signals/"
 os.makedirs(CITADEL_FLOW_FOLDER, exist_ok=True)

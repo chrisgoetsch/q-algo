@@ -10,7 +10,7 @@ load_dotenv()
 
 TRADIER_ACCESS_TOKEN = os.getenv("TRADIER_ACCESS_TOKEN")
 TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
-TRADIER_API_URL = "https://api.tradier.com/v1"
+TRADIER_API_URL = "https://sandbox.tradier.com/v1"
 
 HEADERS = {
     "Authorization": f"Bearer {TRADIER_ACCESS_TOKEN}",

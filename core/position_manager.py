@@ -1,12 +1,5 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# File: core/position_manager.py  — FULL VERSION (final)
-# ─────────────────────────────────────────────────────────────────────────────
-"""Real‑time position supervision for Q‑ALGO v2
-================================================
-Fetches live positions, computes decay & PnL, evaluates mesh + GPT exit triggers,
-submits sell‑to‑close orders, and logs everything for reinforcement learning and
-UI dashboards.
-"""
+# File: core/position_manager.py — PATCHED with enhanced exit visibility, auto-pnls, and trade lifecycle logic
+
 from __future__ import annotations
 
 import os, json, asyncio
@@ -32,29 +25,21 @@ from core.gpt_exit_analyzer import analyze_exit_with_gpt
 from polygon.polygon_rest import get_option_metrics, get_dealer_flow_metrics
 from polygon.polygon_websocket import SPY_LIVE_PRICE
 from core.mesh_optimizer import evaluate_agents
+from core.open_trade_tracker import remove_trade
 
-# ---------------------------------------------------------------------------
-# Paths / constants
-# ---------------------------------------------------------------------------
 LOGS_DIR = "logs"
 SYNC_LOG_PATH = os.path.join(LOGS_DIR, "sync_log.jsonl")
 EXIT_ATTEMPTS_LOG = os.path.join(LOGS_DIR, "exit_attempts.jsonl")
 OPEN_TRADES_PATH = os.path.join(LOGS_DIR, "open_trades.jsonl")
 REINFORCEMENT_PROFILE_PATH = "assistants/reinforcement_profile.json"
 
-# ---------------------------------------------------------------------------
-# Low‑level helpers
-# ---------------------------------------------------------------------------
-
 def _atomic_log(path: str, obj: dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as fh:
         fh.write(json.dumps(obj) + "\n")
 
-
 def get_price() -> float:
     return SPY_LIVE_PRICE.get("mid") or SPY_LIVE_PRICE.get("last_trade") or 0.0
-
 
 def log_exit_attempt(symbol: str, qty: int, response: Dict):
     _atomic_log(EXIT_ATTEMPTS_LOG, {
@@ -64,17 +49,12 @@ def log_exit_attempt(symbol: str, qty: int, response: Dict):
         "response": response,
     })
 
-
 def update_sync_log_with_outcome(option_symbol: str, outcome: str):
     _atomic_log(SYNC_LOG_PATH, {
         "timestamp": datetime.utcnow().isoformat(),
         "option_symbol": option_symbol,
         "exit_result": outcome,
     })
-
-# ---------------------------------------------------------------------------
-# Tradier wrappers
-# ---------------------------------------------------------------------------
 
 def get_open_positions() -> Dict[str, List[dict]]:
     try:
@@ -84,7 +64,6 @@ def get_open_positions() -> Dict[str, List[dict]]:
         logger.error({"event": "get_positions_fail", "error": str(e)})
         return {"positions": []}
 
-
 def confirm_order_success(order_id: str) -> bool:
     try:
         status = get_order_status(order_id).get("order", {}).get("status", "unknown")
@@ -93,10 +72,6 @@ def confirm_order_success(order_id: str) -> bool:
         logger.error({"event": "confirm_order_failed", "error": str(e)})
         return False
 
-# ---------------------------------------------------------------------------
-# GPT + mesh exit evaluation
-# ---------------------------------------------------------------------------
-
 def evaluate_exit(context: dict, position: dict):
     profile = load_reinforcement_profile()
     exit_cutoff = profile.get("suggested_exit_decay", 0.6)
@@ -104,6 +79,7 @@ def evaluate_exit(context: dict, position: dict):
     score_data = score_exit_signals(context, position)
     exit_signal = score_data.get("signal", "hold")
     exit_confidence = score_data.get("confidence", 0.0)
+    votes = score_data.get("votes", [])
 
     pnl = position.get("pnl", 0.0)
     decay = context.get("alpha_decay", 0.0)
@@ -136,14 +112,11 @@ def evaluate_exit(context: dict, position: dict):
             or regime in ["panic", "compressing"]
             or (gpt_signal == "exit" and gpt_conf >= 0.65)
         )
+
         rationale = label_exit_reason(pnl=pnl, decay=decay, mesh_signal=exit_signal)
         return should_exit, rationale, regime
 
     return asyncio.run(decide())
-
-# ---------------------------------------------------------------------------
-# Exit workflow
-# ---------------------------------------------------------------------------
 
 def exit_trade(position: Dict, regime: str) -> bool:
     symbol = position.get("symbol")
@@ -178,6 +151,7 @@ def exit_trade(position: Dict, regime: str) -> bool:
     })
     process_trade_for_learning(position)
     evaluate_agents()
+    remove_trade(trade_id)
     print(f"✅ Exit order confirmed & trade logged ({trade_id})")
     log_allocation_update(
         recommended=0.15,
@@ -189,14 +163,7 @@ def exit_trade(position: Dict, regime: str) -> bool:
     )
     return True
 
-# ---------------------------------------------------------------------------
-# Main loop (called by run_q_algo_live_async)
-# ---------------------------------------------------------------------------
-
 def manage_positions(vix_value: float = 18.0):
-    """Periodic loop called by run_q_algo_live_async.
-    Iterates over all open option positions and decides whether to exit.
-    """
     positions = get_open_positions().get("positions", [])
     for position in positions:
         if not isinstance(position, dict):
@@ -208,12 +175,10 @@ def manage_positions(vix_value: float = 18.0):
             logger.warning({"event": "manage_pos_missing_symbol", "pos": position})
             continue
 
-        # ----- Market + option metrics -------------------------------------
         price = get_price()
         option_data = get_option_metrics(option_symbol) or {}
         dealer_data = get_dealer_flow_metrics("SPY") or {}
 
-        # ----- Alpha‑decay computation -------------------------------------
         entry_time = position.get("entry_time")
         mesh_score = position.get("mesh_score", 50)
         minutes_alive = position.get("minutes_alive", 30)
@@ -238,7 +203,6 @@ def manage_positions(vix_value: float = 18.0):
             "pnl": pnl,
         }
 
-        # Log decay update
         log_alpha_decay(
             trade_id=position.get("trade_id", option_symbol),
             symbol=option_symbol,
@@ -249,7 +213,6 @@ def manage_positions(vix_value: float = 18.0):
             rationale="decay_update",
         )
 
-        # ----- Exit decision ------------------------------------------------
         should_exit, rationale, regime = evaluate_exit(context, position)
         print(f"[EVAL] {option_symbol} | PnL {pnl:+.2f} | Decision: {rationale}")
 

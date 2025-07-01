@@ -1,223 +1,206 @@
-# File: core/mesh_router.py  (refactored for v2 logging)
-"""Central hub that fuses individual agent signals into a single mesh score.
+# mesh_router.py
+# Q-ALGO v2 Mesh Agent Router (full integration with q_think and all agents, optimized for 10-agent strategy)
 
-Highlights
-----------
-• Uses `core.logger_setup.get_logger(__name__)` instead of atomic_append_json.
-• Writes mesh-signal details via logger at INFO level (JSON format).
-• Keeps compatibility with legacy `log_manager.write_mesh_log` if present.
-• Ensures deterministic mesh_score scaling (sum of triggered base_scores capped at 100).
-"""
-from __future__ import annotations
-
-import random, uuid, json, os
+import os
+import uuid
+import json
+import random
 from datetime import datetime
 from typing import Dict, List
 
-from core.mesh_optimizer import load_agent_performance
 from core.logger_setup import get_logger
 
-try:
-    from core.log_manager import write_mesh_log  # legacy util
-except ImportError:
-    write_mesh_log = None  # type: ignore
-
-from mesh.q_0dte_brain import score_and_log as brain_score
+from mesh.q_block import get_block_signal
+from mesh.q_quant import get_quant_signal
+from mesh.q_trap import get_trap_signal
+from mesh.q_shield import get_shield_signal
+from mesh.q_shadow import get_shadow_signal
+from mesh.q_gamma import get_gamma_signal
+from mesh.q_precision import sniper_entry_signal
+from mesh.q_scout import get_scout_signal
+from mesh.q_0dte_brain import score_and_log as score_q_brain
+from mesh.q_think import synthesize_mesh_signals
 
 logger = get_logger(__name__)
+MESH_LOG_PATH = os.getenv("MESH_LOG_PATH", "logs/mesh_logger.jsonl")
 
-# ---------------------------------------------------------------------------
-# Constants / paths
-# ---------------------------------------------------------------------------
-MESH_SIGNAL_LOG = os.getenv("MESH_SIGNAL_LOG", "logs/mesh_signals.jsonl")
-AGENTS: List[str] = [
+AGENTS = [
     "q_block",
-    "q_trap",
     "q_quant",
+    "q_trap",
+    "q_shield",
+    "q_shadow",
+    "q_gamma",
     "q_precision",
     "q_scout",
     "q_0dte_brain",
+    "q_think"
 ]
 
-# ---------------------------------------------------------------------------
-# Internal helper to persist per-agent signals
-# ---------------------------------------------------------------------------
+SIGNAL_PATH = "logs/mesh_signals.jsonl"
 
-def _persist_signal(entry: dict):
-    os.makedirs(os.path.dirname(MESH_SIGNAL_LOG), exist_ok=True)
-    with open(MESH_SIGNAL_LOG, "a") as fh:
-        fh.write(json.dumps(entry) + "\n")
+AGENT_CALLS = [
+    get_block_signal,
+    get_quant_signal,
+    get_trap_signal,
+    lambda: {"agent": "q_shield", **get_shield_signal()},
+    get_shadow_signal,
+    get_gamma_signal,
+    sniper_entry_signal,
+    get_scout_signal,
+    lambda: {"agent": "q_0dte_brain", **score_q_brain({
+        "spy_price": 443.12,
+        "vix": 15.2,
+        "gex": -800_000_000,
+        "dex": 900_000_000,
+        "vwap_diff": -0.08,
+        "skew": 1.11
+    })}
+]
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def write_mesh_log(entry: dict):
+    """
+    Writes a mesh-related event or signal to persistent log.
+    Safe for use across agents or exit evaluators.
 
-def get_mesh_signal(context: Dict) -> Dict:
-    symbol = context.get("symbol", "SPY")
-    return _score_mesh_signals(symbol, context)
+    Format: JSONL with timestamp field auto-patched if missing.
+    """
+    try:
+        os.makedirs(os.path.dirname(MESH_LOG_PATH), exist_ok=True)
+        if "timestamp" not in entry:
+            entry["timestamp"] = datetime.utcnow().isoformat()
 
-# ---------------------------------------------------------------------------
-# Core scoring routine
-# ---------------------------------------------------------------------------
+        with open(MESH_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
-def _score_mesh_signals(symbol: str, context: Dict | None = None) -> Dict:
-    context = context or {}
-    perf = {
-    "q_block": {"score": 90},
-    "q_trap": {"score": 92},
-    "q_quant": {"score": 95},
-    "q_precision": {"score": 93},
-    "q_scout": {"score": 91},
-    "q_0dte_brain": {"score": 85}
-}
+    except Exception as e:
+        from core.logger_setup import logger
+        logger.warning({
+            "event": "mesh_log_write_fail",
+            "err": str(e),
+            "fallback_entry": entry
+        })
 
+def _log_signal(entry):
+    os.makedirs(os.path.dirname(SIGNAL_PATH), exist_ok=True)
+    with open(SIGNAL_PATH, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
-    triggered: List[str] = []
-    agent_scores: Dict[str, float] = {}
-    signal_ids: Dict[str, str] = {}
+def get_all_agent_signals() -> List[dict]:
+    """Calls each mesh agent to retrieve a directional signal."""
+    signals = []
+    for fn in AGENT_CALLS:
+        try:
+            result = fn()
+            if result and isinstance(result, dict) and result.get("score", 0) >= 0.4:
+                sig_id = str(uuid.uuid4())
+                result["signal_id"] = sig_id
+                result["timestamp"] = result.get("timestamp") or datetime.utcnow().isoformat()
+                signals.append(result)
+                _log_signal(result)
+                logger.info({"event": "mesh_agent_signal", "agent": result["agent"], "score": result["score"], "direction": result["direction"]})
+        except Exception as e:
+            logger.warning({"event": "mesh_agent_fail", "agent": getattr(fn, "__name__", str(fn)), "err": str(e)})
+    return signals
 
-    # Pull commonly used context vars once
-    iv = context.get("iv", 0)
-    delta = context.get("delta", 0)
-    gamma = context.get("gamma", 0)
-    skew = context.get("skew", 0)
-    dealer_flow = context.get("dealer_flow", 0)
+def summarize_votes(signals: List[dict]) -> str:
+    votes = []
+    for s in signals:
+        direction = s.get("direction")
+        agent = s.get("agent")
+        score = s.get("score", 0)
+        if direction:
+            status = "✅" if score >= 0.5 else "⚠️"
+            votes.append(f"   {agent:<12}: {direction.upper():<4} ({score:.2f}) {status}")
+    final_score = round(sum(s.get("score", 0) for s in signals) / max(1, len(signals)), 3)
+    print("\n🔍 MESH VOTES:")
+    print("\n".join(votes))
+    print(f"→ Final mesh_score: {final_score}\n")
+    return final_score
 
-    for agent in AGENTS:
-        base = perf.get(agent, {}).get("score", 0) / 100  # convert to 0–1
+def get_mesh_signal(context: dict = None) -> dict:
+    """Wrapper to get signals and return GPT-synthesized mesh score."""
+    agent_signals = get_all_agent_signals()
+    mesh_result = synthesize_mesh_signals(agent_signals)
+    summarize_votes(agent_signals)
+    return mesh_result
 
-        # Agent-specific modifiers
-        if agent == "q_0dte_brain":
-            state = {
-                "spy_price": context.get("price"),
-                "vwap_diff": context.get("vwap_diff", 0),
-                "skew": skew or 1.0,
-                "gex": context.get("gex", 0),
-                "vix": context.get("vix", 0),
-            }
-            brain = brain_score(state)
-            context.update({
-                "q_brain_pattern": brain["pattern_tag"],
-                "q_brain_suggestion": brain["suggested_action"],
+if __name__ == "__main__":
+    all_signals = get_all_agent_signals()
+    summarize_votes(all_signals)
+
+def score_exit_signals(context: dict, position: dict) -> dict:
+    """
+    Computes exit decision based on mesh agent divergence, decay, and PnL.
+    Returns:
+        {
+            "signal": "exit" | "hold",
+            "confidence": float,
+            "votes": list of diverging agents,
+            "agent_signals": {...},
+            "mesh_score": float,
+            "alpha_decay": float,
+            "pnl": float
+        }
+    """
+    try:
+        alpha_decay = context.get("alpha_decay", 0.0)
+        mesh_score = context.get("mesh_score", 50)
+        pnl = context.get("pnl", 0.0)
+
+        agent_signals = position.get("agent_signals") or {}
+        if not agent_signals:
+            logger.warning({
+                "event": "exit_signal_missing_agents",
+                "position": position.get("symbol")
             })
-            score = round(brain["confidence"], 2)
-        elif agent == "q_block":
-            score = round(min(1.0, base + gamma * 0.5 + skew * 0.2), 2)
-        elif agent == "q_trap":
-            score = round(min(1.0, base + iv * 0.3 + dealer_flow * 0.4), 2)
-        elif agent == "q_quant":
-            score = round(min(1.0, base + delta * 0.6 + iv * 0.2), 2)
-        elif agent == "q_precision":
-            score = round(min(1.0, base + gamma * 0.3 + skew * 0.3), 2)
-        elif agent == "q_scout":
-            score = round(min(1.0, base + dealer_flow * 0.3 + iv * 0.2), 2)
-        else:
-            score = base
 
-        agent_scores[agent] = score
-        if random.random() < score:
-            triggered.append(agent)
+        # Agents with confidence < 0.5 are considered diverging
+        exit_votes = [agent for agent, score in agent_signals.items() if score < 0.5]
 
-    mesh_score = min(sum(perf.get(a, {}).get("score", 0) for a in triggered), 100)
+        # Composite exit confidence
+        exit_confidence = round(min(1.0, (len(exit_votes) / (len(agent_signals) or 1)) + alpha_decay), 3)
 
-    # Persist individual agent signals
-    for agent in AGENTS:
-        sid = str(uuid.uuid4())
-        signal_ids[agent] = sid
-        _persist_signal({
-            "signal_id": sid,
-            "timestamp": datetime.utcnow().isoformat(),
-            "agent": agent,
-            "agent_score": agent_scores[agent],
-            "combined_score": mesh_score,
-            "context": {
-                "symbol": symbol,
-                "iv": iv,
-                "delta": delta,
-                "gamma": gamma,
-                "skew": skew,
-                "dealer_flow": dealer_flow,
-            },
-        })
+        signal = "exit" if exit_confidence >= 0.65 or pnl < -0.25 else "hold"
 
-    # Structured log
-    logger.info({
-        "event": "mesh_score",
-        "symbol": symbol,
-        "mesh_score": mesh_score,
-        "triggered": triggered,
-    })
-
-    # Legacy log manager if available
-    if write_mesh_log:
-        write_mesh_log({
-            "timestamp": datetime.utcnow().isoformat(),
-            "symbol": symbol,
-            "triggered_agents": triggered,
+        result = {
+            "signal": signal,
+            "confidence": exit_confidence,
+            "votes": exit_votes,
+            "agent_signals": agent_signals,
             "mesh_score": mesh_score,
-            "agent_signals": agent_scores,
+            "alpha_decay": alpha_decay,
+            "pnl": pnl
+        }
+
+        logger.info({
+            "event": "exit_signal_scored",
+            "symbol": position.get("symbol"),
+            **result
         })
 
-    return {
-        "score": mesh_score,
-        "trigger_agents": triggered,
-        "agent_signals": agent_scores,
-        "signal_ids": signal_ids,
-    }
+        if write_mesh_log:
+            write_mesh_log({
+                "timestamp": datetime.utcnow().isoformat(),
+                "event": "exit_eval",
+                "symbol": position.get("symbol"),
+                **result
+            })
 
-# ---------------------------------------------------------------------------
-# Exit-signal scoring (unchanged except logger)
-# ---------------------------------------------------------------------------
+        return result
 
-def score_exit_signals(context: Dict, position: Dict) -> Dict:
-    perf = load_agent_performance()
-    triggered: List[str] = []
-
-    iv = context.get("iv", 0)
-    delta = context.get("delta", 0)
-    gamma = context.get("gamma", 0)
-    skew = context.get("skew", 0)
-    dealer_flow = context.get("dealer_flow", 0)
-    pnl = position.get("pnl", 0)
-
-    for agent in AGENTS:
-        base = perf.get(agent, {}).get("score", 0) / 100
-
-        if agent == "q_0dte_brain":
-            state = {
-                "spy_price": context.get("price"),
-                "vwap_diff": context.get("vwap_diff", 0),
-                "skew": skew or 1.0,
-                "gex": context.get("gex", 0),
-                "vix": context.get("vix", 0),
-            }
-            score = round(brain_score(state)["confidence"], 2)
-        elif agent == "q_block":
-            score = round(min(1.0, base + skew * 0.3 - pnl * 0.05), 2)
-        elif agent == "q_trap":
-            score = round(min(1.0, base + iv * 0.2 + dealer_flow * 0.3), 2)
-        elif agent == "q_quant":
-            score = round(min(1.0, base + delta * 0.5 + pnl * 0.1), 2)
-        elif agent == "q_precision":
-            score = round(min(1.0, base + gamma * 0.4 - pnl * 0.05), 2)
-        elif agent == "q_scout":
-            score = round(min(1.0, base + dealer_flow * 0.3 + iv * 0.1), 2)
-        else:
-            score = base
-
-        if random.random() < score:
-            triggered.append(agent)
-
-    confidence = (
-        min(sum(perf.get(a, {}).get("score", 0) for a in triggered) / 100, 1.0)
-        if triggered
-        else 0.0
-    )
-    signal = "exit" if confidence > 0.6 else "hold"
-
-    return {
-        "signal": signal,
-        "confidence": round(confidence, 2),
-        "trigger_agents": triggered,
-        "rationale": f"{len(triggered)} agents triggered: {', '.join(triggered)}",
-    }
+    except Exception as e:
+        logger.error({
+            "event": "exit_signal_score_failed",
+            "err": str(e),
+            "position": position.get("symbol")
+        })
+        return {
+            "signal": "hold",
+            "confidence": 0.0,
+            "votes": [],
+            "agent_signals": {},
+            "mesh_score": 0,
+            "alpha_decay": 0,
+            "pnl": 0.0
+        }

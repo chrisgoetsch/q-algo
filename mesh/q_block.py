@@ -1,59 +1,57 @@
-# q_block.py
-# Q-ALGO v2 - Detects order block zones using open interest heatmap
+# File: mesh/q_block.py
+# SPY 0DTE Order Block Signal Agent (Q-Block v2 with Polygon Order Block Feed)
 
-import json
 import datetime
-from polygon.polygon_utils import round_to_nearest_strike
+from typing import Optional
+from polygon.polygon_utils import round_to_nearest_strike, get_open_interest_by_strike
 from polygon.polygon_rest import get_last_price
+from core.logger_setup import logger
 
-def load_heatmap():
-    try:
-        with open("data/open_interest_heatmap.json", "r") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"❌ Failed to load heatmap: {e}")
-        return {}
+OI_THRESHOLD = 10000
 
-def get_block_signal():
+def detect_order_block_signal() -> Optional[dict]:
     try:
-        price = get_last_price()
+        price = get_last_price("SPY")
         if not price:
             return None
 
         strike = round_to_nearest_strike(price)
-        heatmap = load_heatmap()
+        oi_map = get_open_interest_by_strike("SPY")
 
-        strike_str = str(strike)
-        if strike_str not in heatmap:
-            print(f"⚠️ No heatmap data for strike {strike}")
+        if str(strike) not in oi_map:
             return None
 
-        data = heatmap[strike_str]
-        call_oi = data.get("call", 0)
-        put_oi = data.get("put", 0)
-        max_oi = max(call_oi, put_oi)
+        zone = oi_map[str(strike)]
+        call_oi = zone.get("call_oi", 0)
+        put_oi = zone.get("put_oi", 0)
 
-        if max_oi < 10000:
-            print(f"🟡 Not enough OI at strike {strike}")
+        if max(call_oi, put_oi) < OI_THRESHOLD:
             return None
 
-        direction = "call" if put_oi > call_oi else "put"
+        total_oi = call_oi + put_oi
+        oi_ratio = (call_oi - put_oi) / max(total_oi, 1)
+        bias = "call" if oi_ratio > 0 else "put"
+        score = round(abs(oi_ratio), 4)
 
         return {
             "agent": "q_block",
-            "confidence": 0.85,
-            "direction": direction,
-            "score": 0.83,
-            "zone": strike,
+            "score": score,
+            "direction": bias,
+            "confidence": round(score * 100),
             "features": {
                 "strike": strike,
+                "price": price,
                 "call_oi": call_oi,
-                "put_oi": put_oi
+                "put_oi": put_oi,
+                "oi_ratio": round(oi_ratio, 4)
             },
             "timestamp": datetime.datetime.utcnow().isoformat()
         }
 
     except Exception as e:
-        print(f"❌ q_block error: {e}")
+        logger.error({"agent": "q_block", "event": "order_block_fail", "error": str(e)})
         return None
 
+
+# Entry point for mesh_router
+get_block_signal = detect_order_block_signal

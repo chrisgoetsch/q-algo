@@ -1,8 +1,21 @@
 # File: qthink/qthink_pattern_matcher.py
 # Purpose: GPT-style reasoning engine for reflecting on 0DTE pattern outcomes
-# Used by q_0dte_brain.py to analyze memory and provide strategy feedback
 
 from collections import defaultdict
+from dotenv import load_dotenv
+import os
+from openai import OpenAI
+
+load_dotenv()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+try:
+    if OPENAI_API_KEY:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    else:
+        client = None
+except Exception:
+    client = None
 
 def gpt_reflect_on_patterns(summary: dict) -> dict:
     """
@@ -12,13 +25,19 @@ def gpt_reflect_on_patterns(summary: dict) -> dict:
     - Pattern performance tags
     - Recommendations for each pattern
     """
-    
+
+    if summary is None or not isinstance(summary, dict):
+        return {"error": "Invalid input summary"}
+
+    # Fallback: no GPT client available
+    if client is None:
+        return {"status": "unavailable", "reason": "No OpenAI key or client error"}
+
     pattern_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0})
-    
+
     tags = summary.get("tags", [])
     results = summary.get("result_outcomes", [])
 
-    # Build pattern statistics
     for tag, result in zip(tags, results):
         pattern_stats[tag]["count"] += 1
         if result == "win":
@@ -26,7 +45,6 @@ def gpt_reflect_on_patterns(summary: dict) -> dict:
         elif result == "loss":
             pattern_stats[tag]["losses"] += 1
 
-    # Generate GPT-like reflections
     reflections = {}
     for tag, stats in pattern_stats.items():
         count = stats["count"]
@@ -41,7 +59,6 @@ def gpt_reflect_on_patterns(summary: dict) -> dict:
             "action": ""
         }
 
-        # GPT-style logic for actionable intelligence
         if win_rate >= 0.7 and count >= 5:
             reflection["note"] = "high-performing pattern"
             reflection["action"] = "reinforce"

@@ -1,21 +1,14 @@
 #!/bin/bash
+# File: start_q_algo.sh — Q-ALGO V2 Startup Script
 
 echo "🔄 Activating virtual environment..."
-source ~/q-algo-v2/venv/bin/activate
+source .venv/bin/activate || { echo "❌ Failed to activate venv"; exit 1; }
 
 echo "🔄 Sourcing environment..."
-source .env
+export $(grep -v '^#' .env | xargs)
 
 echo "🚀 Running Preflight Check..."
-python preflight_check.py
-EXIT_CODE=$?
+python3 preflight_check.py || { echo "❌ Preflight failed. Aborting."; exit 1; }
 
-if [ $EXIT_CODE -ne 0 ]; then
-  echo "🛑 Preflight check failed. Q-ALGO will not launch."
-  exit 1
-fi
-
-echo "✅ Preflight passed. Launching Q-ALGO..."
-. .venv/bin/activate
-$(which python) run_q_algo_live_async.py
-
+echo "✅ Preflight complete. Starting Q-ALGO live loop..."
+python3 run_q_algo_live_async.py

@@ -1,107 +1,90 @@
-# File: preflight_check.py
+# File: preflight_check.py — Verified startup sequence for Q-ALGO V2
 
-import sys
 import os
+import sys
 import json
-import requests
-from dotenv import load_dotenv
-from pathlib import Path
+import time
 from datetime import datetime
+from core.logger_setup import get_logger
+from core.env_validator import validate_env
+from core.resilient_request import resilient_get
 
-REQUIRED_ENV_VARS = [
-    "TRADIER_ACCOUNT_ID",
-    "TRADIER_ACCESS_TOKEN",
-    "OPENAI_API_KEY",
-    "POLYGON_API_KEY",
-    "TRADIER_API_BASE"
-]
+logger = get_logger(__name__)
 
-REQUIRED_FILES = [
-    "logs/runtime_state.json",
-    "logs/status.json",
-    "logs/open_trades.jsonl",
-    "data/mesh_config.json"
-]
+TRADIER_BASE = os.getenv("TRADIER_API_BASE", "https://sandbox.tradier.com/v1")
+TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
-MINIMUM_REQUIRED_CASH = float(os.getenv("MINIMUM_REQUIRED_CASH", 1.00))  # $1 default
+POLYGON_URL = f"https://api.polygon.io/v3/snapshot/options/SPY?apiKey={POLYGON_API_KEY}"
+TRADIER_BALANCES_URL = f"{TRADIER_BASE}/accounts/{TRADIER_ACCOUNT_ID}/balances"
+TRADIER_ORDERS_URL = f"{TRADIER_BASE}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+TRADIER_POSITIONS_URL = f"{TRADIER_BASE}/accounts/{TRADIER_ACCOUNT_ID}/positions"
 
-def check_env_file():
-    root_path = Path(__file__).resolve().parent
-    dotenv_path = root_path / ".env"
-    if not dotenv_path.exists():
-        print(f"❌ Missing .env file at {dotenv_path}")
-        return False
-    load_dotenv(dotenv_path)
-    all_present = True
-    print("🔍 Validating environment variables:")
-    for var in REQUIRED_ENV_VARS:
-        if not os.getenv(var):
-            print(f"    ❌ Missing: {var}")
-            all_present = False
-        else:
-            print(f"    ✅ {var}")
-    return all_present
 
-def check_files():
-    all_present = True
-    print("\n📁 Checking required system files:")
-    for rel_path in REQUIRED_FILES:
-        file_path = Path(__file__).resolve().parent / rel_path
-        if not file_path.exists():
-            print(f"    ❌ Missing file: {rel_path}")
-            all_present = False
-        elif file_path.suffix == ".json":
-            try:
-                with open(file_path) as f:
-                    json.load(f)
-                print(f"    ✅ {rel_path}")
-            except Exception as e:
-                print(f"    ❌ Malformed JSON: {rel_path} → {e}")
-                all_present = False
-        else:
-            print(f"    ✅ {rel_path}")
-    return all_present
-
-def check_tradier_funding():
-    print("\n💰 Checking Tradier account balance...")
-    token = os.getenv("TRADIER_ACCESS_TOKEN")
-    account_id = os.getenv("TRADIER_ACCOUNT_ID")
-    base = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1")
-
-    url = f"{base}/accounts/{account_id}/balances"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
-    }
-
+def check_polygon():
     try:
-        resp = requests.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        balances = data.get("balances", {})
-        cash = balances.get("total_cash", 0)
-        buying_power = balances.get("margin", {}).get("option_buying_power", 0)
-
-        print(f"    💵 Cash: ${cash:.2f} | Option Buying Power: ${buying_power:.2f}")
-
-        if float(cash) < MINIMUM_REQUIRED_CASH and float(buying_power) < MINIMUM_REQUIRED_CASH:
-            print(f"    ❌ Insufficient funds: minimum required is ${MINIMUM_REQUIRED_CASH:.2f}")
-            return False
+        import requests
+        r = requests.get(POLYGON_URL)
+        if r.status_code == 401:
+            raise Exception("401 Unauthorized — check POLYGON_API_KEY.")
+        r.raise_for_status()
+        if not r.content:
+            raise Exception("Empty response from Polygon — check credentials.")
+        data = r.json()
+        if "results" not in data:
+            raise Exception("Missing 'results' key — possible API/key mismatch.")
         return True
     except Exception as e:
-        print(f"    ❌ Failed to retrieve or parse Tradier balances: {e}")
+        logger.error({"event": "polygon_preflight_fail", "err": str(e)})
+        print("❌ Preflight check failed:", e)
         return False
 
-def main():
-    print(f"\n🚀 Q-ALGO v2 Preflight Check — {datetime.utcnow().isoformat()} UTC\n")
-    env_ok = check_env_file()
-    files_ok = check_files()
-    funding_ok = check_tradier_funding()
 
-    if env_ok and files_ok and funding_ok:
-        print("\n✅ All systems GO. You're ready to launch Q-ALGO.\n")
-        sys.exit(0)
+def check_tradier():
+    try:
+        balances = resilient_get(TRADIER_BALANCES_URL).json()
+        orders = resilient_get(TRADIER_ORDERS_URL).json()
+        positions = resilient_get(TRADIER_POSITIONS_URL).json()
+
+        print("\n💼 Tradier Account Snapshot:")
+        print(json.dumps({
+            "balances": balances,
+            "orders": orders,
+            "positions": positions,
+        }, indent=2))
+        return True
+    except Exception as e:
+        logger.error({"event": "tradier_preflight_fail", "err": str(e)})
+        return False
+
+
+def check_logs():
+    try:
+        os.makedirs("logs/", exist_ok=True)
+        test_path = "logs/preflight_test.log"
+        with open(test_path, "w") as f:
+            f.write(f"Preflight log test @ {datetime.utcnow().isoformat()}\n")
+        os.remove(test_path)
+        return True
+    except Exception as e:
+        logger.error({"event": "log_dir_write_fail", "err": str(e)})
+        return False
+
+
+def run_preflight_check():
+    print("🚀 Running Preflight Check...")
+    validate_env()
+    polygon_ok = check_polygon()
+    tradier_ok = check_tradier()
+    logs_ok = check_logs()
+
+    if polygon_ok and tradier_ok and logs_ok:
+        print("✅ Preflight passed. Launching Q-ALGO...")
+        return True
     else:
-        print("\n⚠️ Preflight check failed. Fix issues above before running.\n")
-        sys.exit(1) 
-   
+        print("❌ Preflight check failed. Fix issues and retry.")
+        return False
+
+
+if __name__ == "__main__":
+    run_preflight_check()

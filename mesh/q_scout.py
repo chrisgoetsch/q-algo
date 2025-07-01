@@ -1,25 +1,56 @@
-# q_scout.py
-# Legacy pattern detector for SPY intraday scalps
+# File: mesh/q_scout.py
+# Q-ALGO v2 – Legacy pattern-based SPY 0DTE agent upgraded with GPT logic
 
-import random
+import json
+from datetime import datetime
+from polygon.polygon_utils import get_intraday_returns, get_vwap
+from qthink.qthink_pattern_matcher import gpt_reflect_on_patterns
+from core.logger_setup import logger
 
-def scout_signal(symbol="SPY"):
+
+def get_scout_signal(symbol="SPY"):
     """
-    Produces a legacy pattern-based score.
-    Replace with real pattern logic or remove if deprecated.
+    Produces a pattern-based GPT signal for SPY 0DTE scalping.
+    Uses intraday return, VWAP diff, and GPT scoring.
     """
     try:
-        pattern_score = round(random.uniform(0.2, 0.8), 3)
-        return {
-            "agent": "q_scout",
-            "score": pattern_score,
-            "direction": "CALL" if pattern_score > 0.5 else "PUT",
-            "reason": "Legacy mean-reversion pattern triggered",
-            "features": {
-                "scout_score": pattern_score
-            }
+        intraday_return = get_intraday_returns(symbol)
+        vwap = get_vwap(symbol)
+        features = {
+            "intraday_return": intraday_return,
+            "vwap": vwap,
+            "symbol": symbol
         }
-    except Exception as e:
-        print(f"[q_scout] Pattern detection failed: {e}")
+
+        reflection_input = {
+            "agent": "q_scout",
+            "data": features
+        }
+        gpt_result = gpt_reflect_on_patterns(reflection_input)
+
+        direction = gpt_result.get("final_direction", "stand down")
+        score = float(gpt_result.get("confidence_score", 0.5))
+        rationale = gpt_result.get("rationale", "No rationale")
+
+        if direction.lower() in ["call", "put"]:
+            return {
+                "agent": "q_scout",
+                "score": round(score, 4),
+                "direction": direction.lower(),
+                "confidence": round(score * 100, 2),
+                "features": {
+                    **features,
+                    "gpt_rationale": rationale
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
         return None
 
+    except Exception as e:
+        logger.error({"agent": "q_scout", "event": "signal_fail", "err": str(e)})
+        return None
+
+
+if __name__ == "__main__":
+    print(json.dumps(get_scout_signal(), indent=2))

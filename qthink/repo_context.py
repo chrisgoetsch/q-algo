@@ -7,7 +7,7 @@ def get_context_snippets():
         "core/entry_learner.py",
         "mesh/q_0dte.py",
         "analytics/q_backtest.py",
-        "run_q_algo_live.py",
+        "run_q_algo_live_async.py",
         "runtime_state.json"
     ]
     base = Path(__file__).parent.parent / "q-algo-v2"

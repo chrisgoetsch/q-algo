@@ -5,21 +5,24 @@ import json
 import os
 import websockets
 from dotenv import load_dotenv
+from core.tradier_execution import get_atm_option_symbol
 
 load_dotenv()
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
-# Replace this with whatever your Q-ALGO is producing
-RAW_SYMBOL = "SPY250620C00595000"  # simulate output from option_selector
-
 async def test_polygon_ws():
-    # Patch missing prefix
-    symbol = RAW_SYMBOL
-    if not symbol.startswith("O:"):
-        print(f"⚠️  Prefix missing. Patching with O: → {symbol}")
-        symbol = f"O:{symbol}"
+    # Get best option from live selector
+    opt = get_atm_option_symbol("SPY", side="call", verbose=True)
+    if not opt or not opt.get("symbol"):
+        print("❌ No valid option returned.")
+        return
 
-    print(f"✅ Using subscription symbol: {symbol}")
+    raw_symbol = opt["symbol"]
+    if not raw_symbol.startswith("O:"):
+        print(f"⚠️ Prefix missing. Patching → {raw_symbol}")
+        raw_symbol = f"O:{raw_symbol}"
+
+    print(f"✅ Subscribing to: {repr(raw_symbol)}")
 
     try:
         async with websockets.connect("wss://socket.polygon.io/options") as ws:
@@ -27,8 +30,8 @@ async def test_polygon_ws():
             auth_resp = await ws.recv()
             print("🔐 Auth response:", auth_resp)
 
-            await ws.send(json.dumps({"action": "subscribe", "params": symbol}))
-            print(f"📡 Sent subscription for {symbol}")
+            await ws.send(json.dumps({"action": "subscribe", "params": raw_symbol}))
+            print(f"📡 Sent subscription for: {repr(raw_symbol)}")
 
             try:
                 while True:

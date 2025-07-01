@@ -1,9 +1,101 @@
 {
-  "q_0dte": 1.0,
-  "q_quant": 1.0,
-  "q_block": 1.0,
-  "q_precision": 1.0,
-  "q_trap": 1.0,
-  "q_scout": 1.0,
-  "q_shield": 1.0
+  "mode": "0DTE",
+  "default_weight_strategy": "adaptive",
+  "agents": {
+    "q_block": {
+      "enabled": true,
+      "base_score": 85,
+      "dynamic_weight": true,
+      "role": "override",
+      "decay_on_loss": 0.1,
+      "conditions": {
+        "vix_max": 25,
+        "regimes_excluded": ["panic", "compressing"]
+      }
+    },
+    "q_trap": {
+      "enabled": true,
+      "base_score": 70,
+      "dynamic_weight": false,
+      "role": "entry_filter",
+      "conditions": {
+        "market_hours_only": true,
+        "macro_blacklist": ["fomc", "cpi"]
+      }
+    },
+    "q_quant": {
+      "enabled": true,
+      "base_score": 60,
+      "dynamic_weight": true,
+      "role": "core_entry",
+      "conditions": {
+        "min_volume": 100000,
+        "macro_whitelist": ["quadwitch", "opex"]
+      }
+    },
+    "q_precision": {
+      "enabled": true,
+      "base_score": 90,
+      "dynamic_weight": true,
+      "role": "core_entry",
+      "conditions": {
+        "regimes_only": ["bullish", "stable", "trending"],
+        "max_drawdown_pct": 10
+      }
+    },
+    "q_scout": {
+      "enabled": false,
+      "base_score": 75,
+      "dynamic_weight": false,
+      "role": "experimental",
+      "conditions": {}
+    },
+    "q_0dte_brain": {
+      "enabled": true,
+      "base_score": 80,
+      "dynamic_weight": true,
+      "role": "pattern_gpt",
+      "decay_on_loss": 0.05,
+      "conditions": {
+        "regimes_only": ["bullish", "trending", "choppy"],
+        "exclude_if_vix_above": 28
+      }
+    },
+    "q_shield": {
+      "enabled": true,
+      "base_score": 50,
+      "dynamic_weight": true,
+      "role": "risk_guard",
+      "conditions": {
+        "vix_min": 15,
+        "vvix_min": 85
+      }
+    },
+    "q_shadow": {
+      "enabled": true,
+      "base_score": 65,
+      "dynamic_weight": true,
+      "role": "unusual_flow",
+      "conditions": {
+        "min_hidden_bid_ratio": 0.2,
+        "max_skew": 1.25
+      }
+    },
+    "q_gamma": {
+      "enabled": true,
+      "base_score": 75,
+      "dynamic_weight": true,
+      "role": "dealer_pressure",
+      "conditions": {
+        "min_gex_strength": 0.4
+      }
+    },
+    "q_think": {
+      "enabled": true,
+      "base_score": 88,
+      "dynamic_weight": false,
+      "role": "meta_synth",
+      "conditions": {}
+    }
+  }
 }

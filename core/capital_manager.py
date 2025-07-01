@@ -18,12 +18,15 @@ from typing import Dict
 
 import httpx
 from core.logger_setup import get_logger
+from core.tradier_client import get_positions
+
+
 
 # ─────────────────────────────── configuration
 logger              = get_logger(__name__)
 TRADIER_ACCOUNT_ID  = os.getenv("TRADIER_ACCOUNT_ID", "")
 TRADIER_TOKEN       = os.getenv("TRADIER_ACCESS_TOKEN", "")
-TRADIER_API_BASE    = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
+TRADIER_API_BASE    = os.getenv("TRADIER_API_BASE", "https://sandbox.tradier.com/v1").rstrip("/")
 BAL_ENDPOINT        = f"{TRADIER_API_BASE}/accounts/{TRADIER_ACCOUNT_ID}/balances"
 POLL_BASE_SECS      = 5          # fast cadence for 0-DTE
 POLL_MAX_SECS       = 60         # back-off ceiling
@@ -47,7 +50,14 @@ _balance: Dict[str, float] | None = None
 _last_fetch: float = 0.0
 _backoff:    float = POLL_BASE_SECS
 
-
+def get_open_position_count() -> int:
+    try:
+        positions = get_positions().get("positions", [])
+        return len([p for p in positions if isinstance(p, dict)])
+    except Exception as e:
+        logger.warning({"event": "position_count_fail", "err": str(e)})
+        return 0
+    
 def safe_fetch_tradier_equity(retries: int = 2, delay: float = 0.5) -> float:
     for attempt in range(retries + 1):
         eq = fetch_tradier_equity()
